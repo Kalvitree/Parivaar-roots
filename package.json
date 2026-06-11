@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "deploy": "vite build && gh-pages -d dist"
+    "deploy": "rm -rf dist &&vite build && gh-pages -d dist --dotfiles"
   },
   "dependencies": {
     "@supabase/realtime-js": "^2.107.0",
