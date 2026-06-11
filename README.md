@@ -55,7 +55,7 @@ Open `generate-icon.html` in a browser to generate these from the 🌿 leaf icon
 ### 4. Run locally
 ```bash
 npm run dev
-# Opens at http://localhost:5173/MyRoots/
+# Opens at http://localhost:5173/parivaar-roots/
 ```
 
 ---
@@ -178,9 +178,9 @@ npm run deploy
 ```
 
 This builds to `dist/` and pushes to the `gh-pages` branch.
-Your app will be live at: `https://your-username.github.io/MyRoots/`
+Your app will be live at: `https://your-username.github.io/parivaar-roots/`
 
-> Make sure `base: '/MyRoots/'` in `vite.config.js` matches your repo name.
+> Make sure `base: '/parivaar-roots/'` in `vite.config.js` matches your repo name.
 
 ---
 
@@ -199,4 +199,4 @@ Your app will be live at: `https://your-username.github.io/MyRoots/`
 - No passwords — sign-in uses Supabase magic links
 - Files in `attachments` storage are only accessible to members of the same family circle
 - The app installs to any phone home screen as a PWA
-- `base: '/MyRoots/'` in vite.config.js must match your GitHub repo name if deploying via gh-pages
+- `base: '/parivaar-roots/'` in vite.config.js must match your GitHub repo name if deploying via gh-pages
