@@ -1,8 +1,8 @@
 const CACHE = 'roots-v1';
 const ASSETS = [
-  '/parivaar-roots/',
-  '/parivaar-roots/index.html',
-  '/parivaar-roots/manifest.json',
+  '/Parivaar-roots/',
+  '/Parivaar-roots/index.html',
+  '/Parivaar-roots/manifest.json',
   'https://fonts.googleapis.com/css2?family=Lora:ital,wght@0,400;0,500;0,600;1,400&family=DM+Sans:wght@300;400;500&display=swap'
 ];
 
@@ -39,7 +39,7 @@ self.addEventListener('fetch', e => {
           caches.open(CACHE).then(c => c.put(e.request, clone));
         }
         return res;
-      }).catch(() => caches.match('/parivaar-roots/index.html'));
+      }).catch(() => caches.match('/Parivaar-roots/index.html'));
     })
   );
 });
