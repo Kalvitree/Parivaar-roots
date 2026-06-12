@@ -804,7 +804,6 @@ export default function App() {
       <div className="scroll-area">
 
         {/* ── DASHBOARD ── */}
-        {screen === 'dashboard' && <InstallBanner/>}
         {/* Member filter chips */}
             {members.length > 0 && (
               <div style={{ display: 'flex', gap: 8, padding: '12px 20px', overflowX: 'auto' }}>
@@ -858,8 +857,7 @@ export default function App() {
                 );
               })
             )}
-          </>
-        )}
+          </div>
 
         {/* ── ADD MEMORY ── */}
         {screen === 'add' && (
@@ -1040,7 +1038,7 @@ export default function App() {
           </>
         )}
 
-      </div>{/* end scroll-area */}
+      {/* end scroll-area */}
 
       {/* Bottom nav */}
       {['dashboard', 'add', 'detail', 'circle'].includes(screen) && (
