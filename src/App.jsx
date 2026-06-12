@@ -804,21 +804,8 @@ export default function App() {
       <div className="scroll-area">
 
         {/* ── DASHBOARD ── */}
-        {screen === 'dashboard' && (
-          <>
-            {/* PWA install banner */}
-            {canInstall && (
-              <div className="install-banner" onClick={promptInstall}>
-                <span style={{ fontSize: 28 }}>🌿</span>
-                <div className="install-banner-text">
-                  <div className="install-banner-title">Add to your home screen</div>
-                  <div className="install-banner-sub">Open like an app — no App Store needed</div>
-                </div>
-                <button onClick={(e) => { e.stopPropagation(); dismissInstall(); }} style={{ background: 'none', border: 'none', color: 'rgba(255,255,255,0.7)', fontSize: 20, cursor: 'pointer', padding: '4px 8px', flexShrink: 0 }}>✕</button>
-              </div>
-            )}
-
-            {/* Member filter chips */}
+        {screen === 'dashboard' && <InstallBanner/>}
+        {/* Member filter chips */}
             {members.length > 0 && (
               <div style={{ display: 'flex', gap: 8, padding: '12px 20px', overflowX: 'auto' }}>
                 <button className={`member-chip ${!filterMember ? 'selected' : ''}`} onClick={() => setFilterMember(null)}>All</button>
