@@ -400,7 +400,9 @@ export default function App() {
   const [session, setSession] = useState(null);
   const [user, setUser]       = useState(null);
   const [loading, setLoading] = useState(true);
+  const [loadingMsg, setLoadingMsg] = useState(''); // <--- ADD THIS LINE
   const [email, setEmail]     = useState('');
+  const [password, setPassword] = useState(''); // <--- ADD THIS LINE
 
   const [family, setFamily]   = useState(null);
   const [member, setMember]   = useState(null);
@@ -481,6 +483,38 @@ export default function App() {
         .from('family_circles').select('*').eq('invite_token', inviteToken).maybeSingle();
       if (fc) {
         setFamily(fc);
+        const cached = localStorage.getItem('parivaar_pending_invite');
+        if (cached) {
+          try {
+            const { name, relationship } = JSON.parse(cached);
+            
+            // Auto-create their member row now that they are authenticated!
+            const { count } = await supabase.from('members').select('*', { count: 'exact', head: true }).eq('family_id', fc.id);
+            const { data: newMember, error } = await supabase
+              .from('members')
+              .insert({ 
+                family_id: fc.id, 
+                user_id: user.id, 
+                name: name, 
+                relationship: relationship, 
+                role: count === 0 ? 'admin' : 'member', 
+                joined_at: new Date().toISOString() 
+              })
+              .select().single();
+
+            if (!error && newMember) {
+              localStorage.removeItem('parivaar_pending_invite'); // Clean up cache
+              setMember(newMember);
+              await fetchFamilyData(fc.id);
+              showToast(`Welcome to ${fc.name}! 🎉`);
+              setScreen('dashboard');
+              setLoading(false);
+              return;
+            }
+          } catch (e) {
+            console.error("Failed to parse cached signup data", e);
+          }
+        }
         setSetupMode('join');
         setScreen('setup');
         setLoading(false);
@@ -549,17 +583,85 @@ export default function App() {
     setSaving(false);
   };
 
-  // ── Sign in ──────────────────────────────────────────────────────────────────
+  // ── password authentication ──────────────────────────────────────────────────────────────────
+ // ── Password Authentication (Temporary) ──────────────────────────────────────
   const signIn = async () => {
-    if (!email.trim()) { showToast('Enter your email.'); return; }
-    const base = `${window.location.origin}${import.meta.env.BASE_URL}`;
-    const redirectTo = inviteToken ? `${base}?invite=${inviteToken}` : base;
-    const { error } = await supabase.auth.signInWithOtp({
+    if (!email.trim() || !password.trim()) {
+      showToast('Please enter both email and password.');
+      return;
+    }
+    if (inviteToken && (!setupName.trim() || !setupRelationship.trim())) {
+      showToast('Please enter your Name and Relationship to join.');
+      return;
+    }
+
+    setLoadingMsg('Signing into Parivaar... 🌿');
+
+    // 1. Try to log in with Email & Password
+    const { data: signInData, error: signInError } = await supabase.auth.signInWithPassword({
       email: email.trim(),
-      options: { emailRedirectTo: redirectTo },
+      password: password.trim(),
     });
-    if (error) { showToast(error.message); return; }
-    showToast('Magic link sent — check your inbox ✉️');
+
+    // 2. If user doesn't exist, automatically sign them up
+    if (signInError && signInError.status === 400 && signInError.message.includes('Invalid login credentials')) {
+      // Create account
+      const { data: signUpData, error: signUpError } = await supabase.auth.signUp({
+        email: email.trim(),
+        password: password.trim(),
+      });
+
+      if (signUpError) {
+        showToast(signUpError.message);
+        setLoadingMsg('');
+        return;
+      }
+
+      // If they are signing up via an invite link, write their member record immediately
+      if (inviteToken && signUpData.user) {
+        const { data: fc } = await supabase
+          .from('family_circles').select('*').eq('invite_token', inviteToken).maybeSingle();
+        
+        if (fc) {
+          setFamily(fc);
+          const { count } = await supabase.from('members').select('*', { count: 'exact', head: true }).eq('family_id', fc.id);
+          const { data: newMember, error: mErr } = await supabase
+            .from('members')
+            .insert({ 
+              family_id: fc.id, 
+              user_id: signUpData.user.id, 
+              name: setupName.trim(), 
+              relationship: setupRelationship.trim(), 
+              role: count === 0 ? 'admin' : 'member', 
+              joined_at: new Date().toISOString() 
+            })
+            .select().single();
+
+          if (!mErr && newMember) {
+            setMember(newMember);
+            await fetchFamilyData(fc.id);
+            showToast(`Account created! Welcome to ${fc.name}! 🎉`);
+            setScreen('dashboard');
+          } else if (mErr) {
+            showToast(mErr.message);
+          }
+        }
+      } else {
+        showToast('Account created! Logging you in...');
+      }
+      setLoadingMsg('');
+      return;
+    }
+
+    // 3. Handle unexpected sign-in errors
+    if (signInError) {
+      showToast(signInError.message);
+      setLoadingMsg('');
+      return;
+    }
+
+    showToast('Logged in successfully! 👋');
+    setLoadingMsg('');
   };
 
   // ── Upload helpers ───────────────────────────────────────────────────────────
@@ -693,6 +795,7 @@ export default function App() {
   }
 
   // ─── SIGN IN ─────────────────────────────────────────────────────────────────
+  // ─── SIGN IN ─────────────────────────────────────────────────────────────────
   if (!session && screen === 'signin') {
     return (
       <div className="app-shell">
@@ -702,10 +805,31 @@ export default function App() {
           <p style={{ fontSize: 13, letterSpacing: 3, color: 'rgba(255,255,255,0.65)', margin: 0, textTransform: 'uppercase' }}>परिवार</p>
         </div>
         <div className="card" style={{ margin: '24px 20px 0' }}>
-          {inviteToken && <div className="invite-banner" style={{ marginBottom: 16 }}><span style={{ fontSize: 20 }}>🎉</span><span>You've been invited to join a family circle!</span></div>}
-          <p className="section-label">Sign in with your email</p>
-          <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="your@email.com" onKeyDown={(e) => e.key === 'Enter' && signIn()} />
-          <button className="btn btn-primary btn-full" style={{ marginTop: 12 }} onClick={signIn}>Send magic link →</button>
+          {inviteToken ? (
+            <>
+              <div className="invite-banner" style={{ marginBottom: 16 }}>
+                <span style={{ fontSize: 20 }}>🎉</span>
+                <span>You've been invited to join a family circle!</span>
+              </div>
+              <p className="section-label">Your Name</p>
+              <input value={setupName} onChange={(e) => setSetupName(e.target.value)} placeholder="e.g. Grandma Rosa" />
+              
+              <p className="section-label" style={{ marginTop: 14 }}>Your Relationship</p>
+              <input value={setupRelationship} onChange={(e) => setSetupRelationship(e.target.value)} placeholder="e.g. Grandmother, Uncle..." />
+              
+              <p className="section-label" style={{ marginTop: 14 }}>Your Email</p>
+              <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="your@email.com" onKeyDown={(e) => e.key === 'Enter' && signIn()} />
+            </>
+          ) : (
+            <>
+              <p className="section-label">Sign in with your email</p>
+              <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="your@email.com" onKeyDown={(e) => e.key === 'Enter' && signIn()} />
+            </>
+          )}
+
+          <button className="btn btn-primary btn-full" style={{ marginTop: 20 }} onClick={signIn} disabled={!!loadingMsg}>
+            {loadingMsg ? loadingMsg : inviteToken ? 'Verify Email & Join Parivaar →' : 'Send magic link →'}
+          </button>
           <p style={{ fontSize: 12, color: '#999', textAlign: 'center', marginTop: 12 }}>No password needed — we'll email you a sign-in link.</p>
         </div>
         <button style={{ display: 'block', margin: '16px auto 0', background: 'none', border: 'none', color: '#1D9E75', fontSize: 13, cursor: 'pointer' }} onClick={() => setScreen('story')}>← Read our story</button>
