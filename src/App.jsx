@@ -437,7 +437,18 @@ export default function App() {
     setToast(msg);
     setTimeout(() => setToast(''), 2800);
   }, []);
-
+  const handleSignOut = async () => {
+    await supabase.auth.signOut();
+    localStorage.clear();
+    setEmail('');
+    setPasscode('');
+    setCodeSent(false);
+    setSession(null);
+    setUser(null);
+    setMember(null);
+    setFamily(null);
+    setScreen('signin');
+  };
   /* ── PWA install prompt ───────────────────────────────────────────────────────
   const { canInstall, promptInstall, dismissInstall } = useInstallPrompt();*/
 
@@ -483,38 +494,6 @@ export default function App() {
         .from('family_circles').select('*').eq('invite_token', inviteToken).maybeSingle();
       if (fc) {
         setFamily(fc);
-        const cached = localStorage.getItem('parivaar_pending_invite');
-        if (cached) {
-          try {
-            const { name, relationship } = JSON.parse(cached);
-            
-            // Auto-create their member row now that they are authenticated!
-            const { count } = await supabase.from('members').select('*', { count: 'exact', head: true }).eq('family_id', fc.id);
-            const { data: newMember, error } = await supabase
-              .from('members')
-              .insert({ 
-                family_id: fc.id, 
-                user_id: user.id, 
-                name: name, 
-                relationship: relationship, 
-                role: count === 0 ? 'admin' : 'member', 
-                joined_at: new Date().toISOString() 
-              })
-              .select().single();
-
-            if (!error && newMember) {
-              localStorage.removeItem('parivaar_pending_invite'); // Clean up cache
-              setMember(newMember);
-              await fetchFamilyData(fc.id);
-              showToast(`Welcome to ${fc.name}! 🎉`);
-              setScreen('dashboard');
-              setLoading(false);
-              return;
-            }
-          } catch (e) {
-            console.error("Failed to parse cached signup data", e);
-          }
-        }
         setSetupMode('join');
         setScreen('setup');
         setLoading(false);
@@ -643,52 +622,69 @@ export default function App() {
   // ── 6-Digit Email Passcode Authentication ────────────────────────────────────
   
   // Step 1: Request the 6-digit code be sent to their email
-  const sendEmailPasscode = async () => {
-    if (!email.trim()) {
-      showToast('Please enter your email.');
-      return;
+ const sendEmailPasscode = async () => {
+  if (!email.trim()) {
+    showToast('Please enter your email.');
+    return;
+  }
+
+  setLoadingMsg('Sending code... ✉️');
+
+  const { error } = await supabase.auth.signInWithOtp({
+    email: email.trim(),
+    options: {
+      // Explicitly forcing Supabase to handle this as a OTP passcode/user sign up track
+      shouldCreateUser: true, 
     }
+  });
 
-    setLoadingMsg('Sending passcode... ✉️');
-
-    const { error } = await supabase.auth.signInWithOtp({
-      email: email.trim(),
-      options: {
-        shouldCreateUser: true // Automatically creates accounts for new invitees!
-      }
-    });
-
+  if (error) {
+    showToast(error.message);
     setLoadingMsg('');
+    return;
+  }
 
-    if (error) {
-      showToast(error.message);
-      return;
-    }
+  showToast('6-digit code sent to your email! 🎉');
+  setCodeSent(true);
+  setLoadingMsg('');
+};
 
-    setCodeSent(true);
-    showToast('6-digit passcode sent to your inbox!');
-  };
-
+  // Step 2: Verify the code the user typed in
   // Step 2: Verify the code the user typed in
   const verifyEmailPasscode = async () => {
     if (!passcode.trim()) {
-      showToast('Please enter the 6-digit code.');
+      showToast('Please enter your passcode.');
       return;
     }
 
     setLoadingMsg('Verifying code... 🌿');
 
-    const { data, error } = await supabase.auth.verifyOtp({
+    // 1. Attempt standard sign-in/magic link OTP track
+    let { data, error } = await supabase.auth.verifyOtp({
       email: email.trim(),
       token: passcode.trim(),
       type: 'email'
     });
 
+    // 2. Sign-Up Fallback Trap: Try verifying as a brand-new user sign-up if standard track fails
     if (error) {
-      showToast(error.message);
+      console.log("Switching to signup verification fallback...");
+      const signUpResult = await supabase.auth.verifyOtp({
+        email: email.trim(),
+        token: passcode.trim(),
+        type: 'signup'
+      });
+      
+      data = signUpResult.data;
+      error = signUpResult.error;
+    }
+
+    if (error) {
+      showToast(`Verification failed: ${error.message}`);
       setLoadingMsg('');
       return;
     }
+    
     // Capture the newly authenticated session and user details
     setSession(data.session);
     setUser(data.user); 
@@ -697,18 +693,18 @@ export default function App() {
     if (inviteToken) {
       const { data: fc } = await supabase
         .from('family_circles').select('*').eq('invite_token', inviteToken).maybeSingle();
-      
       if (fc) {
         setFamily(fc);
-        setSetupMode('join'); // Tells the setup screen they are joining, not creating
-        setScreen('setup');   // Route to setup view for profile data capture
-        setLoadingMsg('');
-      } // <--- FIXED: Added this missing closing brace for if (fc)
-    } else {
-      showToast('Logged in successfully! 👋');
+        setSetupMode('join');
+        setScreen('setup');
+      } else {
+        showToast('Invite link not found. Ask your family for a new one.');
+        setScreen('no-access');
+      }
     }
+    // resolveFamily will handle routing for returning members (no inviteToken)
     setLoadingMsg('');
-  };
+  }; // <--- THIS CLOSING BRACE WAS MISSING
 
   // ── Upload helpers ───────────────────────────────────────────────────────────
   const uploadVoice = async (memoryId) => {
@@ -847,7 +843,7 @@ export default function App() {
             ) : (
               <>
                 <p className="section-label">Enter 6-Digit Code sent to {email}</p>
-                <input type="text" maxLength="6" value={passcode} onChange={(e) => setPasscode(e.target.value.replace(/\D/g, ''))} placeholder="123456" style={{ letterSpacing: 8, textAlign: 'center', fontSize: 20 }} onKeyDown={(e) => e.key === 'Enter' && verifyEmailPasscode()} />
+                <input type="text" maxLength="8" value={passcode} onChange={(e) => setPasscode(e.target.value.replace(/\D/g, ''))} placeholder="123456" style={{ letterSpacing: 8, textAlign: 'center', fontSize: 20 }} onKeyDown={(e) => e.key === 'Enter' && verifyEmailPasscode()} />
                 <button className="btn btn-primary btn-full" style={{ marginTop: 20 }} onClick={verifyEmailPasscode} disabled={!!loadingMsg}>
                   {loadingMsg ? loadingMsg : 'Verify Passcode & Continue →'}
                 </button>
@@ -893,14 +889,22 @@ export default function App() {
                     </button>
                   </>
                 ) : (
-                  <>
-                    <p className="section-label" style={{ margin: '0 0 6px', textAlign: 'center' }}>Enter Passcode sent to {email}</p>
-                    <input type="text" maxLength="6" value={passcode} onChange={(e) => setPasscode(e.target.value.replace(/\D/g, ''))} placeholder="123456" style={{ letterSpacing: 8, textAlign: 'center', fontSize: 20, marginBottom: 12 }} onKeyDown={(e) => e.key === 'Enter' && verifyEmailPasscode()} />
-                    <button className="btn btn-primary btn-full" style={{ background: '#1D9E75', borderColor: '#1D9E75' }} onClick={verifyEmailPasscode} disabled={!!loadingMsg}>
-                      {loadingMsg ? loadingMsg : 'Verify & Log In →'}
-                    </button>
-                    <button style={{ display: 'block', margin: '12px auto 0', background: 'none', border: 'none', color: '#666', fontSize: 12, cursor: 'pointer' }} onClick={() => setCodeSent(false)}>← Change email</button>
-                  </>
+                 <>
+  <p className="section-label">Enter Passcode sent to {email}</p>
+  <input 
+    type="text" 
+    maxLength="8" 
+    value={passcode} 
+    onChange={(e) => setPasscode(e.target.value)} 
+    placeholder="ab12cd34" 
+    style={{ letterSpacing: 4, textAlign: 'center', fontSize: 20 }} 
+    onKeyDown={(e) => e.key === 'Enter' && verifyEmailPasscode()} 
+  />
+  <button className="btn btn-primary btn-full" style={{ marginTop: 20 }} onClick={verifyEmailPasscode} disabled={!!loadingMsg}>
+    {loadingMsg ? loadingMsg : 'Verify Passcode & Continue →'}
+  </button>
+  <button style={{ display: 'block', margin: '12px auto 0', background: 'none', border: 'none', color: '#666', fontSize: 12, cursor: 'pointer' }} onClick={() => setCodeSent(false)}>← Change email</button>
+</>
                 )}
               </div>
             </div>
@@ -911,18 +915,7 @@ export default function App() {
     );
   }
 
-  const handleSignOut = async () => {
-    await supabase.auth.signOut();
-    localStorage.clear();
-    setEmail('');
-    setPasscode('');
-    setCodeSent(false);
-    setSession(null);
-    setUser(null);
-    setMember(null);
-    setFamily(null);
-    setScreen('signin');
-  };
+ 
 
   // ─── SETUP SCREEN ────────────────────────────────────────────────────────────
   if (screen === 'setup') {
@@ -964,14 +957,22 @@ export default function App() {
                   </button>
                 </>
               ) : (
-                <>
-                  <p className="section-label" style={{ textAlign: 'center', marginBottom: 8 }}>Enter Passcode sent to {email}</p>
-                  <input type="text" maxLength="6" value={passcode} onChange={(e) => setPasscode(e.target.value.replace(/\D/g, ''))} placeholder="123456" style={{ letterSpacing: 8, textAlign: 'center', fontSize: 20, marginBottom: 14 }} onKeyDown={(e) => e.key === 'Enter' && createFamily()} />
-                  <button className="btn btn-primary btn-full" onClick={createFamily} disabled={saving || !!loadingMsg}>
-                    {loadingMsg ? loadingMsg : 'Verify Passcode & Create Circle 🌿'}
-                  </button>
-                  <button style={{ display: 'block', margin: '12px auto 0', background: 'none', border: 'none', color: '#666', fontSize: 12, cursor: 'pointer' }} onClick={() => setCodeSent(false)}>← Change details</button>
-                </>
+             <>
+  <p className="section-label" style={{ textAlign: 'center', marginBottom: 8 }}>Enter Passcode sent to {email}</p>
+  <input 
+    type="text" 
+    maxLength="8" 
+    value={passcode} 
+    onChange={(e) => setPasscode(e.target.value)} 
+    placeholder="ab12cd34" 
+    style={{ letterSpacing: 4, textAlign: 'center', fontSize: 20, marginBottom: 14 }} 
+    onKeyDown={(e) => e.key === 'Enter' && createFamily()} 
+  />
+  <button className="btn btn-primary btn-full" onClick={createFamily} disabled={saving || !!loadingMsg}>
+    {loadingMsg ? loadingMsg : 'Verify Passcode & Create Circle 🌿'}
+  </button>
+  <button style={{ display: 'block', margin: '12px auto 0', background: 'none', border: 'none', color: '#666', fontSize: 12, cursor: 'pointer' }} onClick={() => setCodeSent(false)}>← Change details</button>
+</>
               )}
             </>
           ) : (
