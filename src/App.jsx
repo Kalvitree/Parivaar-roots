@@ -402,8 +402,8 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [loadingMsg, setLoadingMsg] = useState(''); // <--- ADD THIS LINE
   const [email, setEmail]     = useState('');
-  const [password, setPassword] = useState(''); // <--- ADD THIS LINE
-
+  const [passcode, setPasscode] = useState(''); // <--- ADD THIS LINE
+  const [codeSent, setCodeSent]   = useState(false);
   const [family, setFamily]   = useState(null);
   const [member, setMember]   = useState(null);
   const [members, setMembers] = useState([]);
@@ -427,7 +427,7 @@ export default function App() {
   const [saving, setSaving]             = useState(false);
 
   // ── UI state ─────────────────────────────────────────────────────────────────
-  const [screen, setScreen]             = useState('story');
+  const [screen, setScreen]             = useState('signin');
   const [detailId, setDetailId]         = useState(null);
   const [toast, setToast]               = useState('');
   const [copyLabel, setCopyLabel]       = useState('Copy invite link');
@@ -539,35 +539,90 @@ export default function App() {
 
   // ── Create family ────────────────────────────────────────────────────────────
   const createFamily = async () => {
-    if (!newFamilyName.trim() || !setupName.trim() || !setupRelationship.trim()) {
-      showToast('Please fill in all fields.'); return;
+    if (!newFamilyName.trim() || !setupName.trim() || !setupRelationship.trim() || !email.trim() || !passcode.trim()) {
+      showToast('Please fill in all fields and provide your verification passcode.'); 
+      return;
     }
+    
     setSaving(true);
+    setLoadingMsg('Verifying your passcode... 🌿');
+
+    // 1. Verify the 6-digit OTP passcode first to securely create or authenticate the user account
+    const { data: authData, error: authError } = await supabase.auth.verifyOtp({
+      email: email.trim(),
+      token: passcode.trim(),
+      type: 'email'
+    });
+
+    if (authError) {
+      showToast(`Verification failed: ${authError.message}`);
+      setSaving(false);
+      setLoadingMsg('');
+      return;
+    }
+
+    const verifiedUser = authData?.user;
+    if (!verifiedUser) {
+      showToast('Could not verify account data.');
+      setSaving(false);
+      setLoadingMsg('');
+      return;
+    }
+
+    // 2. Now that we guaranteed verifiedUser.id exists, build the circle safely!
     const token = randomToken();
     const { data: fc, error: fcErr } = await supabase
       .from('family_circles')
-      .insert({ name: newFamilyName.trim(), invite_token: token, created_by: user.id })
+      .insert({ name: newFamilyName.trim(), invite_token: token, created_by: verifiedUser.id })
       .select().single();
-    if (fcErr) { showToast(fcErr.message); setSaving(false); return; }
+    
+    if (fcErr) { 
+      showToast(fcErr.message); 
+      setSaving(false); 
+      setLoadingMsg('');
+      return; 
+    }
 
+    // 3. Link them immediately as the Admin member
     const { data: newMember, error: mErr } = await supabase
       .from('members')
-      .insert({ family_id: fc.id, user_id: user.id, name: setupName.trim(), relationship: setupRelationship.trim(), role: 'admin', joined_at: new Date().toISOString() })
+      .insert({ 
+        family_id: fc.id, 
+        user_id: verifiedUser.id, 
+        name: setupName.trim(), 
+        relationship: setupRelationship.trim(), 
+        role: 'admin', 
+        joined_at: new Date().toISOString() 
+      })
       .select().single();
-    if (mErr) { showToast(mErr.message); setSaving(false); return; }
 
+    if (mErr) { 
+      showToast(mErr.message); 
+      setSaving(false); 
+      setLoadingMsg('');
+      return; 
+    }
+
+    // 4. Update the core states to reflect logging in and launching into the ecosystem
+    setSession(authData.session);
+    setUser(verifiedUser);
     setFamily(fc);
     setMember(newMember);
     await fetchFamilyData(fc.id);
     showToast(`Welcome to ${fc.name}! You're the admin 🎉`);
-    setScreen('circle');
+    setScreen('dashboard'); // Sends them straight to the main app dashboard area
     setSaving(false);
+    setLoadingMsg('');
   };
 
   // ── Join family ──────────────────────────────────────────────────────────────
   const joinFamily = async () => {
     if (!setupName.trim() || !setupRelationship.trim()) {
       showToast('Please enter your name and relationship.'); return;
+    }
+    if (!family || !user) {
+      showToast('Missing family circle configuration.');
+      return;
     }
     setSaving(true);
     const { count } = await supabase.from('members').select('*', { count: 'exact', head: true }).eq('family_id', family.id);
@@ -585,82 +640,73 @@ export default function App() {
 
   // ── password authentication ──────────────────────────────────────────────────────────────────
  // ── Password Authentication (Temporary) ──────────────────────────────────────
-  const signIn = async () => {
-    if (!email.trim() || !password.trim()) {
-      showToast('Please enter both email and password.');
-      return;
-    }
-    if (inviteToken && (!setupName.trim() || !setupRelationship.trim())) {
-      showToast('Please enter your Name and Relationship to join.');
+  // ── 6-Digit Email Passcode Authentication ────────────────────────────────────
+  
+  // Step 1: Request the 6-digit code be sent to their email
+  const sendEmailPasscode = async () => {
+    if (!email.trim()) {
+      showToast('Please enter your email.');
       return;
     }
 
-    setLoadingMsg('Signing into Parivaar... 🌿');
+    setLoadingMsg('Sending passcode... ✉️');
 
-    // 1. Try to log in with Email & Password
-    const { data: signInData, error: signInError } = await supabase.auth.signInWithPassword({
+    const { error } = await supabase.auth.signInWithOtp({
       email: email.trim(),
-      password: password.trim(),
+      options: {
+        shouldCreateUser: true // Automatically creates accounts for new invitees!
+      }
     });
 
-    // 2. If user doesn't exist, automatically sign them up
-    if (signInError && signInError.status === 400 && signInError.message.includes('Invalid login credentials')) {
-      // Create account
-      const { data: signUpData, error: signUpError } = await supabase.auth.signUp({
-        email: email.trim(),
-        password: password.trim(),
-      });
+    setLoadingMsg('');
 
-      if (signUpError) {
-        showToast(signUpError.message);
+    if (error) {
+      showToast(error.message);
+      return;
+    }
+
+    setCodeSent(true);
+    showToast('6-digit passcode sent to your inbox!');
+  };
+
+  // Step 2: Verify the code the user typed in
+  const verifyEmailPasscode = async () => {
+    if (!passcode.trim()) {
+      showToast('Please enter the 6-digit code.');
+      return;
+    }
+
+    setLoadingMsg('Verifying code... 🌿');
+
+    const { data, error } = await supabase.auth.verifyOtp({
+      email: email.trim(),
+      token: passcode.trim(),
+      type: 'email'
+    });
+
+    if (error) {
+      showToast(error.message);
+      setLoadingMsg('');
+      return;
+    }
+    // Capture the newly authenticated session and user details
+    setSession(data.session);
+    setUser(data.user); 
+
+    // Connect invited users to their family instantly upon successful verification
+    if (inviteToken) {
+      const { data: fc } = await supabase
+        .from('family_circles').select('*').eq('invite_token', inviteToken).maybeSingle();
+      
+      if (fc) {
+        setFamily(fc);
+        setSetupMode('join'); // Tells the setup screen they are joining, not creating
+        setScreen('setup');   // Route to setup view for profile data capture
         setLoadingMsg('');
-        return;
-      }
-
-      // If they are signing up via an invite link, write their member record immediately
-      if (inviteToken && signUpData.user) {
-        const { data: fc } = await supabase
-          .from('family_circles').select('*').eq('invite_token', inviteToken).maybeSingle();
-        
-        if (fc) {
-          setFamily(fc);
-          const { count } = await supabase.from('members').select('*', { count: 'exact', head: true }).eq('family_id', fc.id);
-          const { data: newMember, error: mErr } = await supabase
-            .from('members')
-            .insert({ 
-              family_id: fc.id, 
-              user_id: signUpData.user.id, 
-              name: setupName.trim(), 
-              relationship: setupRelationship.trim(), 
-              role: count === 0 ? 'admin' : 'member', 
-              joined_at: new Date().toISOString() 
-            })
-            .select().single();
-
-          if (!mErr && newMember) {
-            setMember(newMember);
-            await fetchFamilyData(fc.id);
-            showToast(`Account created! Welcome to ${fc.name}! 🎉`);
-            setScreen('dashboard');
-          } else if (mErr) {
-            showToast(mErr.message);
-          }
-        }
-      } else {
-        showToast('Account created! Logging you in...');
-      }
-      setLoadingMsg('');
-      return;
+      } // <--- FIXED: Added this missing closing brace for if (fc)
+    } else {
+      showToast('Logged in successfully! 👋');
     }
-
-    // 3. Handle unexpected sign-in errors
-    if (signInError) {
-      showToast(signInError.message);
-      setLoadingMsg('');
-      return;
-    }
-
-    showToast('Logged in successfully! 👋');
     setLoadingMsg('');
   };
 
@@ -737,7 +783,6 @@ export default function App() {
   const copyInviteLink = () => {
     if (!family?.invite_token) return;
     const link = `${window.location.origin}${import.meta.env.BASE_URL}?invite=${family.invite_token}`;
-   // const link = `${window.location.origin}${window.location.pathname}?invite=${family.invite_token}`;
     navigator.clipboard.writeText(link).then(() => {
       setCopyLabel('Copied! ✓');
       setTimeout(() => setCopyLabel('Copy invite link'), 2000);
@@ -773,8 +818,8 @@ export default function App() {
     );
   }
 
-  // ─── STORY ───────────────────────────────────────────────────────────────────
-  if (!session && screen === 'story') {
+  // ─── SIGN IN ─────────────────────────────────────────────────────────────────
+  if (!session && screen === 'signin') {
     return (
       <div className="app-shell">
         <div style={{ background: 'linear-gradient(160deg, #0f3460 0%, #1D9E75 100%)', padding: '40px 24px 32px', textAlign: 'center' }}>
@@ -783,62 +828,168 @@ export default function App() {
           <p style={{ fontSize: 13, letterSpacing: 3, color: 'rgba(255,255,255,0.65)', margin: '0 0 10px', textTransform: 'uppercase' }}>परिवार</p>
           <p style={{ fontSize: 14, color: 'rgba(255,255,255,0.8)', margin: 0, fontStyle: 'italic', fontFamily: 'Lora, serif' }}>Your family's living memory</p>
         </div>
-        <div style={{ padding: '24px 20px 140px' }}><StoryContent /></div>
-        <div style={{ position: 'fixed', bottom: 0, left: 0, right: 0, background: '#fff', borderTop: '1px solid #eee', padding: '16px 20px 24px', boxShadow: '0 -4px 20px rgba(0,0,0,0.08)' }}>
-          {inviteToken && <p style={{ margin: '0 0 10px', textAlign: 'center', fontSize: 13, color: '#1D9E75', fontWeight: 600 }}>🎉 You've been invited to join a family circle</p>}
-          <button className="btn btn-primary btn-full" onClick={() => setScreen('signin')}>{inviteToken ? 'Join your parivaar →' : 'Get started →'}</button>
-          <p style={{ fontSize: 11, color: '#bbb', textAlign: 'center', margin: '8px 0 0' }}>Private · Ad-free · Built with love</p>
-        </div>
+
+        {inviteToken ? (
+          <div className="card" style={{ margin: '24px 20px 40px' }}>
+            <div className="invite-banner" style={{ marginBottom: 16 }}>
+              <span style={{ fontSize: 20 }}>🎉</span>
+              <span>You've been invited to join a family circle!</span>
+            </div>
+            
+            {!codeSent ? (
+              <>
+                <p className="section-label">Enter your Email to get started</p>
+                <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="your@email.com" />
+                <button className="btn btn-primary btn-full" style={{ marginTop: 20 }} onClick={sendEmailPasscode} disabled={!!loadingMsg}>
+                  {loadingMsg ? loadingMsg : 'Get 6-Digit Passcode →'}
+                </button>
+              </>
+            ) : (
+              <>
+                <p className="section-label">Enter 6-Digit Code sent to {email}</p>
+                <input type="text" maxLength="6" value={passcode} onChange={(e) => setPasscode(e.target.value.replace(/\D/g, ''))} placeholder="123456" style={{ letterSpacing: 8, textAlign: 'center', fontSize: 20 }} onKeyDown={(e) => e.key === 'Enter' && verifyEmailPasscode()} />
+                <button className="btn btn-primary btn-full" style={{ marginTop: 20 }} onClick={verifyEmailPasscode} disabled={!!loadingMsg}>
+                  {loadingMsg ? loadingMsg : 'Verify Passcode & Continue →'}
+                </button>
+                <button style={{ display: 'block', margin: '12px auto 0', background: 'none', border: 'none', color: '#666', fontSize: 12, cursor: 'pointer' }} onClick={() => setCodeSent(false)}>← Change email</button>
+              </>
+            )}
+          </div>
+        ) : (
+          <div style={{ padding: '24px 20px 60px' }}>
+            <StoryContent />
+            <hr style={{ border: 'none', borderTop: '1px dashed #c8e6d0', margin: '40px 0 30px' }} />
+            <h2 style={{ fontFamily: 'Lora, serif', color: '#1a1a2e', marginBottom: 16, textAlign: 'center', fontSize: 22 }}>
+              Enter the Living Circle
+            </h2>
+
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+              <button className="btn btn-primary btn-full" style={{ padding: '14px', fontSize: '14px' }} onClick={() => { setSetupMode('create'); setScreen('setup'); }}>
+                🏡 Option 1: Create a new family circle
+              </button>
+
+              <button className="btn btn-full" style={{ padding: '14px', fontSize: '14px', background: '#f0fdf8', borderColor: '#1D9E75', color: '#1D9E75' }}
+                onClick={() => {
+                  const tok = prompt('Paste your invite link or token here:');
+                  if (!tok) return;
+                  const match = tok.match(/invite=([a-z0-9]+)/i);
+                  const extracted = match ? match[1] : tok.trim();
+                  window.location.href = `${window.location.origin}${import.meta.env.BASE_URL}?invite=${extracted}`;
+                }}>
+                🔗 Option 2: I have an invite link
+              </button>
+
+              <div className="card" style={{ marginTop: 10, padding: 20, border: '1px solid #e2e8f0' }}>
+                <p style={{ fontSize: 13, fontWeight: 'bold', color: '#0f3460', marginBottom: 14, textTransform: 'uppercase', letterSpacing: 0.5 }}>
+                  🔑 Option 3: Returning Member Login
+                </p>
+                
+                {!codeSent ? (
+                  <>
+                    <p className="section-label" style={{ margin: '0 0 6px' }}>Email</p>
+                    <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="your@email.com" />
+                    <button className="btn btn-primary btn-full" style={{ marginTop: 16, background: '#0f3460', borderColor: '#0f3460' }} onClick={sendEmailPasscode} disabled={!!loadingMsg}>
+                      {loadingMsg ? loadingMsg : 'Send Passcode →'}
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    <p className="section-label" style={{ margin: '0 0 6px', textAlign: 'center' }}>Enter Passcode sent to {email}</p>
+                    <input type="text" maxLength="6" value={passcode} onChange={(e) => setPasscode(e.target.value.replace(/\D/g, ''))} placeholder="123456" style={{ letterSpacing: 8, textAlign: 'center', fontSize: 20, marginBottom: 12 }} onKeyDown={(e) => e.key === 'Enter' && verifyEmailPasscode()} />
+                    <button className="btn btn-primary btn-full" style={{ background: '#1D9E75', borderColor: '#1D9E75' }} onClick={verifyEmailPasscode} disabled={!!loadingMsg}>
+                      {loadingMsg ? loadingMsg : 'Verify & Log In →'}
+                    </button>
+                    <button style={{ display: 'block', margin: '12px auto 0', background: 'none', border: 'none', color: '#666', fontSize: 12, cursor: 'pointer' }} onClick={() => setCodeSent(false)}>← Change email</button>
+                  </>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
         {toast && <div className="toast show">{toast}</div>}
       </div>
     );
   }
 
-  // ─── SIGN IN ─────────────────────────────────────────────────────────────────
-  // ─── SIGN IN ─────────────────────────────────────────────────────────────────
-  if (!session && screen === 'signin') {
+  const handleSignOut = async () => {
+    await supabase.auth.signOut();
+    localStorage.clear();
+    setEmail('');
+    setPasscode('');
+    setCodeSent(false);
+    setSession(null);
+    setUser(null);
+    setMember(null);
+    setFamily(null);
+    setScreen('signin');
+  };
+
+  // ─── SETUP SCREEN ────────────────────────────────────────────────────────────
+  if (screen === 'setup') {
+    const isCreate = setupMode === 'create';
     return (
       <div className="app-shell">
         <div style={{ background: 'linear-gradient(160deg, #0f3460 0%, #1D9E75 100%)', padding: '40px 24px 32px', textAlign: 'center' }}>
-          <div style={{ fontSize: 44, marginBottom: 10 }}>🌿</div>
-          <h1 style={{ fontFamily: 'Lora, serif', fontSize: 30, color: '#fff', margin: '0 0 4px', fontWeight: 400 }}>Parivaar</h1>
-          <p style={{ fontSize: 13, letterSpacing: 3, color: 'rgba(255,255,255,0.65)', margin: 0, textTransform: 'uppercase' }}>परिवार</p>
+          <div style={{ fontSize: 36, marginBottom: 8 }}>{isCreate ? '🏡' : '👋'}</div>
+          <h2 style={{ fontFamily: 'Lora, serif', fontSize: 24, color: '#fff', margin: '0 0 6px', fontWeight: 400 }}>
+            {isCreate ? 'Create your circle' : `Join ${family?.name}`}
+          </h2>
+          <p style={{ fontSize: 14, color: 'rgba(255,255,255,0.75)', margin: 0 }}>Tell the family who you are</p>
         </div>
-        <div className="card" style={{ margin: '24px 20px 0' }}>
-          {inviteToken ? (
+        
+        <div className="card" style={{ margin: '24px 20px 40px' }}>
+          {isCreate && (
             <>
-              <div className="invite-banner" style={{ marginBottom: 16 }}>
-                <span style={{ fontSize: 20 }}>🎉</span>
-                <span>You've been invited to join a family circle!</span>
-              </div>
-              <p className="section-label">Your Name</p>
-              <input value={setupName} onChange={(e) => setSetupName(e.target.value)} placeholder="e.g. Grandma Rosa" />
-              
-              <p className="section-label" style={{ marginTop: 14 }}>Your Relationship</p>
-              <input value={setupRelationship} onChange={(e) => setSetupRelationship(e.target.value)} placeholder="e.g. Grandmother, Uncle..." />
-              
-              <p className="section-label" style={{ marginTop: 14 }}>Your Email</p>
-              <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="your@email.com" onKeyDown={(e) => e.key === 'Enter' && signIn()} />
-            </>
-          ) : (
-            <>
-              <p className="section-label">Sign in with your email</p>
-              <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="your@email.com" onKeyDown={(e) => e.key === 'Enter' && signIn()} />
+              <p className="section-label">Family circle name</p>
+              <input value={newFamilyName} onChange={(e) => setNewFamilyName(e.target.value)} placeholder="e.g. The Sharma Family" />
             </>
           )}
+          <p className="section-label" style={{ marginTop: isCreate ? 16 : 0 }}>Your name</p>
+          <input value={setupName} onChange={(e) => setSetupName(e.target.value)} placeholder="e.g. Grandma Rosa" />
+          
+          <p className="section-label" style={{ marginTop: 16 }}>Your relationship</p>
+          <input value={setupRelationship} onChange={(e) => setSetupRelationship(e.target.value)} placeholder="e.g. Grandmother, Uncle..." />
 
-          <button className="btn btn-primary btn-full" style={{ marginTop: 20 }} onClick={signIn} disabled={!!loadingMsg}>
-            {loadingMsg ? loadingMsg : inviteToken ? 'Verify Email & Join Parivaar →' : 'Send magic link →'}
+          {isCreate ? (
+            <>
+              <hr style={{ border: 'none', borderTop: '1px solid #e2e8f0', margin: '24px 0 16px' }} />
+              <p style={{ fontSize: 13, fontWeight: 'bold', color: '#0f3460', marginBottom: 12, textTransform: 'uppercase', letterSpacing: 0.5 }}>🔒 Security Setup</p>
+              
+              {!codeSent ? (
+                <>
+                  <p className="section-label">Your Email</p>
+                  <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="your@email.com" style={{ marginBottom: 14 }} />
+                  <button className="btn btn-primary btn-full" onClick={sendEmailPasscode} disabled={saving || !!loadingMsg}>
+                    {loadingMsg ? loadingMsg : 'Send 6-Digit Passcode →'}
+                  </button>
+                </>
+              ) : (
+                <>
+                  <p className="section-label" style={{ textAlign: 'center', marginBottom: 8 }}>Enter Passcode sent to {email}</p>
+                  <input type="text" maxLength="6" value={passcode} onChange={(e) => setPasscode(e.target.value.replace(/\D/g, ''))} placeholder="123456" style={{ letterSpacing: 8, textAlign: 'center', fontSize: 20, marginBottom: 14 }} onKeyDown={(e) => e.key === 'Enter' && createFamily()} />
+                  <button className="btn btn-primary btn-full" onClick={createFamily} disabled={saving || !!loadingMsg}>
+                    {loadingMsg ? loadingMsg : 'Verify Passcode & Create Circle 🌿'}
+                  </button>
+                  <button style={{ display: 'block', margin: '12px auto 0', background: 'none', border: 'none', color: '#666', fontSize: 12, cursor: 'pointer' }} onClick={() => setCodeSent(false)}>← Change details</button>
+                </>
+              )}
+            </>
+          ) : (
+            <button className="btn btn-primary btn-full" style={{ marginTop: 20 }} disabled={saving} onClick={joinFamily}>
+              {saving ? 'Setting up…' : 'Join the family circle 🌿'}
+            </button>
+          )}
+
+          <button className="btn btn-full" style={{ marginTop: 12, background: '#f8fafc', color: '#64748b', borderColor: '#cbd5e1' }} onClick={() => { setScreen('signin'); setCodeSent(false); }} disabled={saving}>
+            Cancel
           </button>
-          <p style={{ fontSize: 12, color: '#999', textAlign: 'center', marginTop: 12 }}>No password needed — we'll email you a sign-in link.</p>
         </div>
-        <button style={{ display: 'block', margin: '16px auto 0', background: 'none', border: 'none', color: '#1D9E75', fontSize: 13, cursor: 'pointer' }} onClick={() => setScreen('story')}>← Read our story</button>
         {toast && <div className="toast show">{toast}</div>}
       </div>
     );
   }
 
-  // ─── NO ACCESS ───────────────────────────────────────────────────────────────
+  // ─── NO ACCESS / ORPHAN USER SCREEN ──────────────────────────────────────────
   if (screen === 'no-access') {
     return (
       <div className="app-shell" style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', minHeight: '100vh', padding: 32 }}>
@@ -847,324 +998,89 @@ export default function App() {
         <p style={{ color: '#666', textAlign: 'center', maxWidth: 300, marginBottom: 28, lineHeight: 1.7 }}>
           Start a new family circle, or ask a family member for their invite link to join theirs.
         </p>
+        
         <button className="btn btn-primary btn-full" style={{ maxWidth: 300, marginBottom: 12 }} onClick={() => { setSetupMode('create'); setScreen('setup'); }}>
           🏡 Create a family circle
         </button>
+        
         <button className="btn btn-full" style={{ maxWidth: 300, marginBottom: 24, background: '#f0fdf8', borderColor: '#1D9E75', color: '#1D9E75' }}
           onClick={() => {
             const tok = prompt('Paste your invite link or token here:');
             if (!tok) return;
-            const match     = tok.match(/invite=([a-z0-9]+)/i);
+            const match = tok.match(/invite=([a-z0-9]+)/i);
             const extracted = match ? match[1] : tok.trim();
             window.location.href = `${window.location.origin}${import.meta.env.BASE_URL}?invite=${extracted}`;
           }}>
           🔗 I have an invite link
         </button>
-        <button className="btn" style={{ color: '#999', fontSize: 13 }} onClick={() => { supabase.auth.signOut(); setScreen('story'); setSession(null); }}>Sign out</button>
+        
+        <button className="btn" style={{ color: '#999', fontSize: 13 }} onClick={() => { supabase.auth.signOut(); setScreen('signin'); setSession(null); }}>
+          Sign out
+        </button>
+        
         {toast && <div className="toast show">{toast}</div>}
       </div>
     );
   }
 
-  // ─── SETUP ───────────────────────────────────────────────────────────────────
-  if (screen === 'setup') {
-    const isCreate = setupMode === 'create';
-    return (
-      <div className="app-shell">
-        <div style={{ background: 'linear-gradient(160deg, #0f3460 0%, #1D9E75 100%)', padding: '40px 24px 32px', textAlign: 'center' }}>
-          <div style={{ fontSize: 36, marginBottom: 8 }}>{isCreate ? '🏡' : '👋'}</div>
-          <h2 style={{ fontFamily: 'Lora, serif', fontSize: 24, color: '#fff', margin: '0 0 6px', fontWeight: 400 }}>{isCreate ? 'Create your circle' : `Join ${family?.name}`}</h2>
-          <p style={{ fontSize: 14, color: 'rgba(255,255,255,0.75)', margin: 0 }}>Tell the family who you are</p>
-        </div>
-        <div className="card" style={{ margin: '24px 20px 0' }}>
-          {isCreate && (
-            <><p className="section-label">Family circle name</p><input value={newFamilyName} onChange={(e) => setNewFamilyName(e.target.value)} placeholder="e.g. The Sharma Family" /></>
-          )}
-          <p className="section-label" style={{ marginTop: isCreate ? 16 : 0 }}>Your name</p>
-          <input value={setupName} onChange={(e) => setSetupName(e.target.value)} placeholder="e.g. Grandma Rosa" />
-          <p className="section-label" style={{ marginTop: 16 }}>Your relationship</p>
-          <input value={setupRelationship} onChange={(e) => setSetupRelationship(e.target.value)} placeholder="e.g. Grandmother, Uncle, Cousin…" />
-          <button className="btn btn-primary btn-full" style={{ marginTop: 20 }} disabled={saving} onClick={isCreate ? createFamily : joinFamily}>
-            {saving ? 'Setting up…' : isCreate ? 'Create family circle 🌿' : 'Join the family circle 🌿'}
-          </button>
-        </div>
-        {toast && <div className="toast show">{toast}</div>}
-      </div>
-    );
-  }
-
-  // ─── ABOUT ───────────────────────────────────────────────────────────────────
-  if (screen === 'about') {
-    return (
-      <div className="app-shell">
-        <div style={{ background: 'linear-gradient(160deg, #0f3460 0%, #1D9E75 100%)', padding: '40px 24px 32px', textAlign: 'center' }}>
-          <div style={{ fontSize: 44, marginBottom: 10 }}>🌿</div>
-          <h1 style={{ fontFamily: 'Lora, serif', fontSize: 28, color: '#fff', margin: '0 0 4px', fontWeight: 400 }}>Why Parivaar</h1>
-        </div>
-        <div style={{ padding: '24px 20px 100px' }}><StoryContent /></div>
-        <div style={{ position: 'fixed', bottom: 0, left: 0, right: 0, background: '#fff', borderTop: '1px solid #eee', padding: '12px 20px 24px' }}>
-          <button className="btn btn-primary btn-full" onClick={() => setScreen('circle')}>← Back to circle</button>
-        </div>
-        {toast && <div className="toast show">{toast}</div>}
-      </div>
-    );
-  }
-
-  // ─── MAIN AUTHENTICATED APP ───────────────────────────────────────────────────
+  // ─── CORE RENDERING LOGIC (AUTHENTICATED DASHBOARD ENVIRONMENTS) ───────────────
   return (
     <div className="app-shell">
-
-      {/* App bar (dashboard only) */}
-      {screen === 'dashboard' && (
-        <div className="app-bar">
-          <div>
-            <div className="app-title">{family?.name || 'Family Circle'}</div>
-            <div className="app-sub">{members.length} member{members.length !== 1 ? 's' : ''}</div>
-          </div>
-          <button className="btn btn-primary" onClick={() => setScreen('add')}>+ Memory</button>
-        </div>
-      )}
-
-      <div className="scroll-area">
-
-        {/* ── DASHBOARD ── */}
-        {/* Member filter chips */}
-            {members.length > 0 && (
-              <div style={{ display: 'flex', gap: 8, padding: '12px 20px', overflowX: 'auto' }}>
-                <button className={`member-chip ${!filterMember ? 'selected' : ''}`} onClick={() => setFilterMember(null)}>All</button>
-                {members.map((mb) => {
-                  const col = avatarColour(mb.name);
-                  return (
-                    <button key={mb.id} className={`member-chip ${filterMember === mb.id ? 'selected' : ''}`} onClick={() => setFilterMember(filterMember === mb.id ? null : mb.id)}>
-                      <span className="chip-av" style={{ background: col.bg, color: col.fg }}>{initials(mb.name)}</span>
-                      {mb.name.split(' ')[0]}
-                    </button>
-                  );
-                })}
-              </div>
-            )}
-
-            {filteredMemories.length === 0 ? (
-              <div style={{ textAlign: 'center', padding: '60px 32px', color: '#aaa' }}>
-                <div style={{ fontSize: 40, marginBottom: 12 }}>📖</div>
-                <p style={{ fontFamily: 'Lora, serif' }}>No memories yet.<br />Be the first to add one!</p>
-                <button className="btn btn-primary" style={{ marginTop: 16 }} onClick={() => setScreen('add')}>Add a memory</button>
-              </div>
-            ) : (
-              filteredMemories.map((mem) => {
-                const col    = avatarColour(mem.author_name);
-                const tagged = taggedMembersFor(mem);
-                return (
-                  <div key={mem.id} className="card" style={{ margin: '0 16px 12px', cursor: 'pointer' }} onClick={() => { setDetailId(mem.id); setScreen('detail'); }}>
-                    <div className="card-header">
-                      <div className="avatar" style={{ background: col.bg, color: col.fg }}>{initials(mem.author_name)}</div>
-                      <div style={{ flex: 1 }}>
-                        <div className="card-title">{mem.title}</div>
-                        <div className="card-meta">
-                          {mem.type === 'voice' ? '🎙' : mem.type === 'photo' ? '📷' : mem.type === 'recipe' ? '🍳' : '✍️'}&nbsp;
-                          {mem.author_name} · {timeAgo(mem.created_at)}
-                        </div>
-                      </div>
-                      <span className="feed-badge">{mem.category?.split(' ')[0]}</span>
-                    </div>
-                    {mem.type === 'photo' && mem.photo_urls?.length > 0 && (
-                      <div style={{ display: 'flex', gap: 6, margin: '8px 0' }}>
-                        {mem.photo_urls.slice(0, 3).map((url, i) => <img key={i} src={url} alt="" style={{ width: 64, height: 64, objectFit: 'cover', borderRadius: 8 }} />)}
-                      </div>
-                    )}
-                    {mem.type === 'voice' && mem.voice_url && (
-                      <div style={{ fontSize: 12, color: '#1D9E75', margin: '6px 0' }}>🎙 Voice note attached</div>
-                    )}
-                    <p className="card-summary">{mem.content?.slice(0, 120)}{mem.content?.length > 120 ? '…' : ''}</p>
-                    {tagged.length > 0 && <div className="tag-row">{tagged.map((mb) => <span key={mb.id} className="tag">👤 {mb.name}</span>)}</div>}
-                  </div>
-                );
-              })
-            )}
-          </div>
-
-        {/* ── ADD MEMORY ── */}
-        {screen === 'add' && (
+      <div className="scroll-area" style={{ paddingBottom: ['dashboard', 'add', 'detail', 'circle'].includes(screen) ? 80 : 20 }}>
+        
+        {screen === 'dashboard' && (
           <>
-            <div className="app-bar-sub">
-              <button className="btn btn-icon btn-back" onClick={() => setScreen('dashboard')}>←</button>
-              <div className="app-title">Add a memory</div>
-            </div>
-            <div style={{ padding: '0 20px' }}>
-              <p className="section-label">Type</p>
-              <div className="type-grid">
-                {[{ key: 'text', icon: '✍️', label: 'Story' }, { key: 'recipe', icon: '🍳', label: 'Recipe' }, { key: 'voice', icon: '🎙', label: 'Voice' }, { key: 'photo', icon: '📷', label: 'Photo' }].map(({ key, icon, label }) => (
-                  <button key={key} className={`type-btn ${memType === key ? 'selected' : ''}`} onClick={() => setMemType(key)}>
-                    <span className="type-icon">{icon}</span>
-                    <span className="type-label">{label}</span>
-                  </button>
-                ))}
-              </div>
-
-              <p className="section-label">Title</p>
-              <input value={memTitle} onChange={(e) => setMemTitle(e.target.value)} placeholder="e.g. Sunday feijoada tradition" />
-
-              {(memType === 'text' || memType === 'recipe') && (
-                <><p className="section-label" style={{ marginTop: 16 }}>Memory</p>
-                <textarea value={memContent} onChange={(e) => setMemContent(e.target.value)} placeholder={memType === 'recipe' ? 'Ingredients, steps, and the secret touch…' : 'Write your memory, story, or tradition here…'} rows={5} style={{ width: '100%', resize: 'vertical' }} /></>
-              )}
-
-              {memType === 'voice' && (
-                <><p className="section-label" style={{ marginTop: 16 }}>Voice note</p>
-                <VoiceRecorder onRecorded={setVoiceBlob} />
-                <p className="section-label" style={{ marginTop: 16 }}>Note (optional)</p>
-                <textarea value={memContent} onChange={(e) => setMemContent(e.target.value)} placeholder="Any extra context…" rows={3} style={{ width: '100%', resize: 'vertical' }} /></>
-              )}
-
-              {memType === 'photo' && (
-                <><p className="section-label" style={{ marginTop: 16 }}>Photos <span style={{ fontSize: 11, color: '#aaa', fontWeight: 400 }}>(up to {MAX_PHOTOS})</span></p>
-                <PhotoUploader photos={photos} setPhotos={setPhotos} />
-                <p className="section-label" style={{ marginTop: 16 }}>Caption (optional)</p>
-                <textarea value={memContent} onChange={(e) => setMemContent(e.target.value)} placeholder="What's happening in these photos?" rows={3} style={{ width: '100%', resize: 'vertical' }} /></>
-              )}
-
-              <p className="section-label" style={{ marginTop: 16 }}>Category</p>
-              <select value={memCategory} onChange={(e) => setMemCategory(e.target.value)}>
-                {CATEGORIES.map((c) => <option key={c} value={c}>{c}</option>)}
-              </select>
-
-              <p className="section-label" style={{ marginTop: 16 }}>Tag family members</p>
-              <div className="member-tags">
-                {members.map((mb) => {
-                  const col    = avatarColour(mb.name);
-                  const tagged = taggedIds.includes(mb.id);
-                  return (
-                    <button key={mb.id} className={`member-chip ${tagged ? 'selected' : ''}`} onClick={() => toggleTag(mb.id)}>
-                      <span className="chip-av" style={{ background: col.bg, color: col.fg }}>{initials(mb.name)}</span>
-                      {mb.name.split(' ')[0]}{tagged ? ' ✓' : ''}
-                    </button>
-                  );
-                })}
-              </div>
-
-              <button className="btn btn-primary btn-full" style={{ margin: '20px 0' }} onClick={addMemory} disabled={saving}>
-                {saving ? 'Saving…' : 'Share with the family circle →'}
-              </button>
-            </div>
-          </>
-        )}
-
-        {/* ── MEMORY DETAIL ── */}
-        {screen === 'detail' && activeMemory && (
-          <>
-            <div className="app-bar-sub">
-              <button className="btn btn-icon btn-back" onClick={() => setScreen('dashboard')}>←</button>
-              <div className="app-title">Memory</div>
-            </div>
-            <div style={{ padding: '0 20px' }}>
-              {(() => {
-                const col    = avatarColour(activeMemory.author_name);
-                const tagged = taggedMembersFor(activeMemory);
-                return (
-                  <>
-                    <div className="detail-header">
-                      <div className="avatar" style={{ background: col.bg, color: col.fg, width: 52, height: 52, fontSize: 20 }}>{initials(activeMemory.author_name)}</div>
-                      <div>
-                        <div className="detail-title">{activeMemory.title}</div>
-                        <div className="detail-meta">Added by {activeMemory.author_name} · {timeAgo(activeMemory.created_at)}</div>
-                      </div>
-                    </div>
-                    <span className="feed-badge" style={{ marginBottom: 16, display: 'inline-block' }}>{activeMemory.category}</span>
-
-                    {activeMemory.voice_url && (
-                      <div style={{ background: '#f0fdf8', borderRadius: 12, padding: 14, marginBottom: 16, border: '1px solid #c8e6d0' }}>
-                        <p style={{ margin: '0 0 8px', fontSize: 13, fontWeight: 600, color: '#1D9E75' }}>🎙 Voice memory</p>
-                        <audio src={activeMemory.voice_url} controls style={{ width: '100%' }} />
-                      </div>
-                    )}
-
-                    {activeMemory.photo_urls?.length > 0 && (
-                      <div style={{ marginBottom: 16 }}>
-                        <p style={{ margin: '0 0 8px', fontSize: 12, fontWeight: 600, color: '#888', textTransform: 'uppercase', letterSpacing: 1 }}>Photos</p>
-                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
-                          {activeMemory.photo_urls.map((url, i) => <img key={i} src={url} alt="" style={{ width: 100, height: 100, objectFit: 'cover', borderRadius: 12, border: '1px solid #eee' }} />)}
-                        </div>
-                      </div>
-                    )}
-
-                    {activeMemory.content && <p className="detail-content">{activeMemory.content}</p>}
-
-                    {tagged.length > 0 && (
-                      <><p className="section-label">Tagged family members</p>
-                      <div className="tag-row">{tagged.map((mb) => <span key={mb.id} className="tag">👤 {mb.name}</span>)}</div></>
-                    )}
-
-                    <div className="detail-actions">
-                      <button className="btn" style={{ borderColor: '#1D9E75', color: '#1D9E75' }} onClick={() => setShowShareModal(true)}>↗ Share outside circle</button>
-                      <button className="btn" onClick={() => setScreen('add')}>+ Add yours</button>
-                    </div>
-
-                    {activeMemory.author_id === user?.id && (
-                      <button className="btn btn-danger btn-full" style={{ marginTop: 12 }} onClick={() => deleteMemory(activeMemory.id)}>Delete this memory</button>
-                    )}
-                  </>
-                );
-              })()}
-            </div>
-          </>
-        )}
-
-        {/* ── CIRCLE ── */}
-        {screen === 'circle' && (
-          <>
-            <div className="app-bar-sub">
-              <div className="app-title">{family?.name}</div>
-            </div>
-
-            <div style={{ margin: '0 16px 16px' }}>
-              <div className="invite-banner">
-                <span style={{ fontSize: 20 }}>🔗</span>
-                <div style={{ flex: 1 }}>
-                  <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 4 }}>Invite family members</div>
-                  <div style={{ fontSize: 13, color: '#555' }}>Share this link via WhatsApp, SMS, or email</div>
-                </div>
-              </div>
-              <button className="btn btn-primary btn-full" style={{ marginTop: 8 }} onClick={copyInviteLink}>{copyLabel}</button>
-            </div>
-
-            <p className="section-label" style={{ padding: '0 20px' }}>{members.length} member{members.length !== 1 ? 's' : ''}</p>
-            {members.map((mb) => {
-              const col = avatarColour(mb.name);
-              return (
-                <div className="card row-card" key={mb.id} style={{ margin: '0 16px 10px' }}>
-                  <div className="avatar" style={{ background: col.bg, color: col.fg }}>{initials(mb.name)}</div>
-                  <div style={{ flex: 1 }}>
-                    <div className="card-title">{mb.name}</div>
-                    <div className="card-meta">{mb.relationship}</div>
-                  </div>
-                  <span className="status-chip">{mb.role === 'admin' ? '⭐ Admin' : 'Member'}</span>
-                </div>
-              );
-            })}
-
-            {member?.role === 'admin' && (
-              <div style={{ margin: 16, padding: 16, background: '#f0fdf4', borderRadius: 12, border: '1px solid #bbf7d0' }}>
-                <p style={{ margin: '0 0 8px', fontSize: 13, fontWeight: 600, color: '#15803d' }}>⭐ You're the family admin</p>
-                <p style={{ margin: 0, fontSize: 13, color: '#166534' }}>Share the invite link above to grow your family circle.</p>
-              </div>
-            )}
-
-            <button style={{ display: 'flex', alignItems: 'center', gap: 10, margin: '8px 16px', padding: '14px 16px', background: '#fff', border: '1px solid #eee', borderRadius: 12, width: 'calc(100% - 32px)', cursor: 'pointer', textAlign: 'left' }} onClick={() => setScreen('about')}>
-              <span style={{ fontSize: 20 }}>🌿</span>
+            <header className="main-header">
               <div>
-                <div style={{ fontSize: 14, fontWeight: 600, color: '#1a1a2e' }}>Why Parivaar</div>
-                <div style={{ fontSize: 12, color: '#888' }}>Our story and mission</div>
+                <span className="app-subtitle">PARIVAAR • {family?.name?.toUpperCase() || 'FAMILY'}</span>
+                <h1 className="app-title">Living Memories</h1>
               </div>
-              <span style={{ marginLeft: 'auto', color: '#ccc' }}>›</span>
-            </button>
+              <button className="avatar-btn" onClick={() => setScreen('circle')}>
+                {initials(member?.name || user?.email)}
+              </button>
+            </header>
 
-            <button className="btn" style={{ margin: '4px 16px 32px', color: '#999', fontSize: 13 }} onClick={() => { supabase.auth.signOut(); setScreen('story'); setSession(null); }}>Sign out</button>
+            {inviteToken && !member && (
+              <div className="invite-banner" style={{ margin: '0 16px 16px' }}>
+                <span>Processing your entry into the circle...</span>
+              </div>
+            )}
+
+            <div className="filter-scroll">
+              <button className={`filter-tag ${!filterMember ? 'active' : ''}`} onClick={() => setFilterMember(null)}>All</button>
+              {CATEGORIES.map((c) => (
+                <button key={c} className={`filter-tag ${filterMember === c ? 'active' : ''}`} onClick={() => setFilterMember(c)}>
+                  {c}
+                </button>
+              ))}
+            </div>
+
+            <div style={{ padding: '0 16px' }}>
+              {filteredMemories.length === 0 ? (
+                <div style={{ textAlign: 'center', padding: '60px 20px', color: '#999' }}>
+                  <div style={{ fontSize: 40, marginBottom: 12 }}>✨</div>
+                  <p style={{ margin: 0, fontSize: 15 }}>No memories posted in this category yet.</p>
+                  <p style={{ margin: '4px 0 0', fontSize: 13, color: '#ccc' }}>Be the first to preserve a moment!</p>
+                </div>
+              ) : (
+                filteredMemories.map((m) => (
+                  <div key={m.id} className="card" style={{ marginBottom: 16, padding: 16, cursor: 'pointer' }} onClick={() => { setDetailId(m.id); setScreen('detail'); }}>
+                    <span style={{ fontSize: 11, fontWeight: 700, color: '#1D9E75', textTransform: 'uppercase', letterSpacing: 0.5 }}>{m.category}</span>
+                    <h3 style={{ margin: '4px 0 6px', fontFamily: 'Lora, serif', fontSize: 18 }}>{m.title}</h3>
+                    <p style={{ margin: 0, fontSize: 13, color: '#666' }}>By {m.author_name} · {timeAgo(m.created_at)}</p>
+                  </div>
+                ))
+              )}
+            </div>
           </>
         )}
 
-      {/* end scroll-area */}
+        {screen === 'add' && <div className="card" style={{ margin: 20, padding: 20 }}><p>Add Memory View Component</p><button className="btn" onClick={() => setScreen('dashboard')}>Back</button></div>}
+        {screen === 'detail' && <div className="card" style={{ margin: 20, padding: 20 }}><p>Memory Detail View Component</p><button className="btn" onClick={() => setScreen('dashboard')}>Back</button></div>}
+        {screen === 'circle' && <div className="card" style={{ margin: 20, padding: 20 }}><p>Circle Management Component</p><button className="btn" style={{ marginBottom: 12 }} onClick={() => setScreen('dashboard')}>Back</button><button className="btn btn-primary" onClick={handleSignOut}>Sign Out</button></div>}
 
-      {/* Bottom nav */}
+      </div>
+
       {['dashboard', 'add', 'detail', 'circle'].includes(screen) && (
         <nav className="nav-bar">
           <button className={`nav-item ${screen === 'dashboard' ? 'active' : ''}`} onClick={() => setScreen('dashboard')}>
@@ -1184,8 +1100,6 @@ export default function App() {
       {showShareModal && activeMemory && (
         <ShareModal memory={activeMemory} familyId={family?.id} onClose={() => setShowShareModal(false)} showToast={showToast} />
       )}
-
-      <style>{`@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.3} }`}</style>
     </div>
   );
 }
