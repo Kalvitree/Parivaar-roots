@@ -474,6 +474,8 @@ export default function App() {
   // ── Family resolution ────────────────────────────────────────────────────────
   const resolveFamily = async () => {
     setLoading(true);
+    
+    // 1. Check if user is already a member of ANY family circle
     const { data: existing } = await supabase
       .from('members')
       .select('*, family_circles(*)')
@@ -489,13 +491,31 @@ export default function App() {
       return;
     }
 
+    // 2. If they have an invite token, check if they are already in that specific family
     if (inviteToken) {
       const { data: fc } = await supabase
         .from('family_circles').select('*').eq('invite_token', inviteToken).maybeSingle();
+      
       if (fc) {
-        setFamily(fc);
-        setSetupMode('join');
-        setScreen('setup');
+        // Double check members table to avoid duplicate key errors
+        const { data: alreadyMember } = await supabase
+          .from('members')
+          .select('*')
+          .eq('family_id', fc.id)
+          .eq('user_id', user.id)
+          .maybeSingle();
+
+        if (alreadyMember) {
+          setMember(alreadyMember);
+          setFamily(fc);
+          await fetchFamilyData(fc.id);
+          setScreen('dashboard');
+        } else {
+          // If genuinely new to this family, send to setup screen
+          setFamily(fc);
+          setSetupMode('join');
+          setScreen('setup');
+        }
         setLoading(false);
         return;
       }
@@ -650,46 +670,96 @@ export default function App() {
 };
 
   // Step 2: Verify the code the user typed in
-  // Step 2: Verify the code the user typed in
   const verifyEmailPasscode = async () => {
     if (!passcode.trim()) {
-      showToast('Please enter your passcode.');
+      showToast('Please enter the passcode.');
       return;
     }
 
     setLoadingMsg('Verifying code... 🌿');
 
-    // 1. Attempt standard sign-in/magic link OTP track
-    let { data, error } = await supabase.auth.verifyOtp({
+    // 1. Authenticate with Supabase Auth
+    const { data, error } = await supabase.auth.verifyOtp({
       email: email.trim(),
       token: passcode.trim(),
       type: 'email'
     });
 
-    // 2. Sign-Up Fallback Trap: Try verifying as a brand-new user sign-up if standard track fails
     if (error) {
-      console.log("Switching to signup verification fallback...");
-      const signUpResult = await supabase.auth.verifyOtp({
-        email: email.trim(),
-        token: passcode.trim(),
-        type: 'signup'
-      });
-      
-      data = signUpResult.data;
-      error = signUpResult.error;
-    }
-
-    if (error) {
-      showToast(`Verification failed: ${error.message}`);
+      showToast(error.message);
       setLoadingMsg('');
       return;
     }
-    
-    // Capture the newly authenticated session and user details
-    setSession(data.session);
-    setUser(data.user); 
 
-    // Connect invited users to their family instantly upon successful verification
+    const authenticatedUser = data?.user;
+    if (!authenticatedUser) {
+      showToast('Authentication failed.');
+      setLoadingMsg('');
+      return;
+    }
+
+    console.log("🎯 STEP 1: Supabase Auth successful. User ID is:", authenticatedUser.id);
+
+    // Explicitly update session and user states immediately
+    setSession(data.session);
+    setUser(authenticatedUser); 
+
+    // 2. Query the custom members table using the secure user ID
+    console.log("🔍 STEP 2: Looking up custom profile in 'members' table...");
+    const { data: existingMember, error: dbError } = await supabase
+      .from('members')
+      .select('*, family_circles(*)')
+      .eq('user_id', authenticatedUser.id)
+      .maybeSingle();
+
+    if (dbError) {
+      console.error("❌ Database Error during lookup:", dbError);
+    }
+
+    if (existingMember) {
+      console.log("✅ STEP 3: Profile found! Member Row Data:", existingMember);
+      
+      // Explicitly commit all data collections to state variables
+      setMember(existingMember);
+      setFamily(existingMember.family_circles);
+      
+      // Pull dynamic memories into feed arrays
+      await fetchFamilyData(existingMember.family_circles.id);
+      
+      // Force system routing straight to dashboard bypass
+      setScreen('dashboard');
+      setLoadingMsg('');
+      return;
+    }
+
+    // 3. Fallback Check: If user_id lookup failed, try searching matching email string 
+    console.log("⚠️ STEP 4: No row found by user_id. Trying fallback search by email string...");
+    const { data: emailMember } = await supabase
+      .from('members')
+      .select('*, family_circles(*)')
+      .eq('email', authenticatedUser.email?.trim())
+      .maybeSingle();
+
+    if (emailMember) {
+      console.log("🎯 Fallback found member matching email string! Upgrading row with secure user_id...");
+      
+      // Repair the database record on-the-fly so this never happens again
+      await supabase
+        .from('members')
+        .update({ user_id: authenticatedUser.id })
+        .eq('id', emailMember.id);
+
+      emailMember.user_id = authenticatedUser.id;
+      setMember(emailMember);
+      setFamily(emailMember.family_circles);
+      await fetchFamilyData(emailMember.family_circles.id);
+      setScreen('dashboard');
+      setLoadingMsg('');
+      return;
+    }
+
+    // 4. Genuine Invitation Path Handling
+    console.log("ℹ️ STEP 5: Completely new user. Evaluating invite token routing context...");
     if (inviteToken) {
       const { data: fc } = await supabase
         .from('family_circles').select('*').eq('invite_token', inviteToken).maybeSingle();
@@ -697,14 +767,15 @@ export default function App() {
         setFamily(fc);
         setSetupMode('join');
         setScreen('setup');
-      } else {
-        showToast('Invite link not found. Ask your family for a new one.');
-        setScreen('no-access');
+        setLoadingMsg('');
+        return;
       }
     }
-    // resolveFamily will handle routing for returning members (no inviteToken)
+
+    // Default catch-all for accounts without any bound circle entries
+    setScreen('no-access');
     setLoadingMsg('');
-  }; // <--- THIS CLOSING BRACE WAS MISSING
+  };
 
   // ── Upload helpers ───────────────────────────────────────────────────────────
   const uploadVoice = async (memoryId) => {
@@ -815,107 +886,78 @@ export default function App() {
   }
 
   // ─── SIGN IN ─────────────────────────────────────────────────────────────────
+  // ─── SIGN IN ─────────────────────────────────────────────────────────────────
   if (!session && screen === 'signin') {
     return (
-      <div className="app-shell">
-        <div style={{ background: 'linear-gradient(160deg, #0f3460 0%, #1D9E75 100%)', padding: '40px 24px 32px', textAlign: 'center' }}>
+      <div style={{ maxWidth: '440px', margin: '0 auto', paddingBottom: 40 }}>
+        <div style={{ background: 'linear-gradient(160deg, #0f3460 0%, #1D9E75 100%)', padding: '40px 24px 32px', textAlign: 'center', borderRadius: '0 0 20px 20px' }}>
           <div style={{ fontSize: 44, marginBottom: 10 }}>🌿</div>
           <h1 style={{ fontFamily: 'Lora, serif', fontSize: 30, color: '#fff', margin: '0 0 4px', fontWeight: 400 }}>Parivaar</h1>
           <p style={{ fontSize: 13, letterSpacing: 3, color: 'rgba(255,255,255,0.65)', margin: '0 0 10px', textTransform: 'uppercase' }}>परिवार</p>
           <p style={{ fontSize: 14, color: 'rgba(255,255,255,0.8)', margin: 0, fontStyle: 'italic', fontFamily: 'Lora, serif' }}>Your family's living memory</p>
         </div>
 
-        {inviteToken ? (
-          <div className="card" style={{ margin: '24px 20px 40px' }}>
-            <div className="invite-banner" style={{ marginBottom: 16 }}>
+        <div style={{ padding: '20px 16px' }}>
+          {inviteToken && (
+            <div style={{ background: '#f0fdf8', border: '1px solid #c8e6d0', color: '#1D9E75', display: 'flex', gap: 10, alignItems: 'center', borderRadius: 12, padding: '12px 14px', marginBottom: 20 }}>
               <span style={{ fontSize: 20 }}>🎉</span>
-              <span>You've been invited to join a family circle!</span>
+              <span style={{ fontSize: 13, fontWeight: 500 }}>You've been invited to join a private family circle!</span>
             </div>
+          )}
+
+          {/* Dedicated Alphanumeric OTP Input Field Panel */}
+          <div className="card" style={{ padding: 20, border: '1px solid #e2e8f0', borderRadius: 16, background: '#fff', marginBottom: 24 }}>
+            <p style={{ fontSize: 13, fontWeight: 'bold', color: '#0f3460', marginBottom: 14, textTransform: 'uppercase', letterSpacing: 0.5 }}>
+              🔑 Member Authentication (Login / Sign Up)
+            </p>
             
             {!codeSent ? (
               <>
-                <p className="section-label">Enter your Email to get started</p>
-                <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="your@email.com" />
-                <button className="btn btn-primary btn-full" style={{ marginTop: 20 }} onClick={sendEmailPasscode} disabled={!!loadingMsg}>
-                  {loadingMsg ? loadingMsg : 'Get 6-Digit Passcode →'}
+                <p className="section-label" style={{ margin: '0 0 6px' }}>Enter Email</p>
+                <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="your@email.com" style={{ width: '100%', padding: '12px', borderRadius: 10, border: '1px solid #cbd5e1', marginBottom: 14 }} />
+                <button className="btn btn-primary btn-full" onClick={sendEmailPasscode} disabled={!!loadingMsg}>
+                  {loadingMsg ? loadingMsg : 'Send 8-Character Passcode →'}
                 </button>
               </>
             ) : (
               <>
-                <p className="section-label">Enter 6-Digit Code sent to {email}</p>
-                <input type="text" maxLength="8" value={passcode} onChange={(e) => setPasscode(e.target.value.replace(/\D/g, ''))} placeholder="123456" style={{ letterSpacing: 8, textAlign: 'center', fontSize: 20 }} onKeyDown={(e) => e.key === 'Enter' && verifyEmailPasscode()} />
-                <button className="btn btn-primary btn-full" style={{ marginTop: 20 }} onClick={verifyEmailPasscode} disabled={!!loadingMsg}>
-                  {loadingMsg ? loadingMsg : 'Verify Passcode & Continue →'}
+                <p className="section-label" style={{ margin: '0 0 6px', textAlign: 'center' }}>Enter Passcode sent to {email}</p>
+                <input type="text" maxLength="8" value={passcode} onChange={(e) => setPasscode(e.target.value)} placeholder="ab12cd34" style={{ width: '100%', padding: '12px', borderRadius: 10, border: '1px solid #cbd5e1', letterSpacing: 4, textAlign: 'center', fontSize: 20, marginBottom: 12 }} onKeyDown={(e) => e.key === 'Enter' && verifyEmailPasscode()} />
+                <button className="btn btn-primary btn-full" style={{ background: '#1D9E75', borderColor: '#1D9E75' }} onClick={verifyEmailPasscode} disabled={!!loadingMsg}>
+                  {loadingMsg ? loadingMsg : 'Verify Passcode & Log In →'}
                 </button>
                 <button style={{ display: 'block', margin: '12px auto 0', background: 'none', border: 'none', color: '#666', fontSize: 12, cursor: 'pointer' }} onClick={() => setCodeSent(false)}>← Change email</button>
               </>
             )}
           </div>
-        ) : (
-          <div style={{ padding: '24px 20px 60px' }}>
-            <StoryContent />
-            <hr style={{ border: 'none', borderTop: '1px dashed #c8e6d0', margin: '40px 0 30px' }} />
-            <h2 style={{ fontFamily: 'Lora, serif', color: '#1a1a2e', marginBottom: 16, textAlign: 'center', fontSize: 22 }}>
-              Enter the Living Circle
-            </h2>
 
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-              <button className="btn btn-primary btn-full" style={{ padding: '14px', fontSize: '14px' }} onClick={() => { setSetupMode('create'); setScreen('setup'); }}>
-                🏡 Option 1: Create a new family circle
-              </button>
+          {!inviteToken && (
+            <>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                <button className="btn btn-full" style={{ padding: '14px', fontSize: '14px', background: '#f8fafc', borderColor: '#cbd5e1', color: '#334155' }} onClick={() => { setSetupMode('create'); setScreen('setup'); }}>
+                  🏡 Create a brand new family circle
+                </button>
 
-              <button className="btn btn-full" style={{ padding: '14px', fontSize: '14px', background: '#f0fdf8', borderColor: '#1D9E75', color: '#1D9E75' }}
-                onClick={() => {
-                  const tok = prompt('Paste your invite link or token here:');
-                  if (!tok) return;
-                  const match = tok.match(/invite=([a-z0-9]+)/i);
-                  const extracted = match ? match[1] : tok.trim();
-                  window.location.href = `${window.location.origin}${import.meta.env.BASE_URL}?invite=${extracted}`;
-                }}>
-                🔗 Option 2: I have an invite link
-              </button>
-
-              <div className="card" style={{ marginTop: 10, padding: 20, border: '1px solid #e2e8f0' }}>
-                <p style={{ fontSize: 13, fontWeight: 'bold', color: '#0f3460', marginBottom: 14, textTransform: 'uppercase', letterSpacing: 0.5 }}>
-                  🔑 Option 3: Returning Member Login
-                </p>
-                
-                {!codeSent ? (
-                  <>
-                    <p className="section-label" style={{ margin: '0 0 6px' }}>Email</p>
-                    <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="your@email.com" />
-                    <button className="btn btn-primary btn-full" style={{ marginTop: 16, background: '#0f3460', borderColor: '#0f3460' }} onClick={sendEmailPasscode} disabled={!!loadingMsg}>
-                      {loadingMsg ? loadingMsg : 'Send Passcode →'}
-                    </button>
-                  </>
-                ) : (
-                 <>
-  <p className="section-label">Enter Passcode sent to {email}</p>
-  <input 
-    type="text" 
-    maxLength="8" 
-    value={passcode} 
-    onChange={(e) => setPasscode(e.target.value)} 
-    placeholder="ab12cd34" 
-    style={{ letterSpacing: 4, textAlign: 'center', fontSize: 20 }} 
-    onKeyDown={(e) => e.key === 'Enter' && verifyEmailPasscode()} 
-  />
-  <button className="btn btn-primary btn-full" style={{ marginTop: 20 }} onClick={verifyEmailPasscode} disabled={!!loadingMsg}>
-    {loadingMsg ? loadingMsg : 'Verify Passcode & Continue →'}
-  </button>
-  <button style={{ display: 'block', margin: '12px auto 0', background: 'none', border: 'none', color: '#666', fontSize: 12, cursor: 'pointer' }} onClick={() => setCodeSent(false)}>← Change email</button>
-</>
-                )}
+                <button className="btn btn-full" style={{ padding: '14px', fontSize: '14px', background: '#f0fdf8', borderColor: '#1D9E75', color: '#1D9E75' }}
+                  onClick={() => {
+                    const tok = prompt('Paste your invite link or token here:');
+                    if (!tok) return;
+                    const match = tok.match(/invite=([a-z0-9]+)/i);
+                    const extracted = match ? match[1] : tok.trim();
+                    window.location.href = `${window.location.origin}${import.meta.env.BASE_URL}?invite=${extracted}`;
+                  }}>
+                  🔗 I have an invite link
+                </button>
               </div>
-            </div>
-          </div>
-        )}
+              <hr style={{ border: 'none', borderTop: '1px dashed #cbd5e1', margin: '40px 0 30px' }} />
+              <StoryContent />
+            </>
+          )}
+        </div>
         {toast && <div className="toast show">{toast}</div>}
       </div>
     );
   }
-
- 
 
   // ─── SETUP SCREEN ────────────────────────────────────────────────────────────
   if (screen === 'setup') {
@@ -1030,56 +1072,302 @@ export default function App() {
       <div className="scroll-area" style={{ paddingBottom: ['dashboard', 'add', 'detail', 'circle'].includes(screen) ? 80 : 20 }}>
         
         {screen === 'dashboard' && (
-          <>
-            <header className="main-header">
+          <div style={{ maxWidth: '480px', margin: '0 auto', padding: '0 16px 40px' }}>
+            {/* Header Area */}
+            <header style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '24px 0 16px', borderBottom: '1px solid #f1f5f9' }}>
               <div>
-                <span className="app-subtitle">PARIVAAR • {family?.name?.toUpperCase() || 'FAMILY'}</span>
-                <h1 className="app-title">Living Memories</h1>
+                <span style={{ fontSize: 11, fontWeight: 700, letterSpacing: 1.5, color: '#1D9E75', textTransform: 'uppercase' }}>
+                  PARIVAAR • {family?.name?.toUpperCase() || 'FAMILY'}
+                </span>
+                <h1 style={{ margin: '4px 0 0', fontFamily: 'Lora, serif', fontSize: 26, color: '#1a1a2e', fontWeight: 600 }}>
+                  Living Memories
+                </h1>
               </div>
-              <button className="avatar-btn" onClick={() => setScreen('circle')}>
+              <button 
+                onClick={() => setScreen('circle')}
+                style={{ width: 42, height: 42, borderRadius: '50%', background: '#f0fdf8', border: '1px solid #1D9E75', color: '#1D9E75', fontWeight: 700, fontSize: 14, cursor: 'pointer' }}
+              >
                 {initials(member?.name || user?.email)}
               </button>
             </header>
 
             {inviteToken && !member && (
-              <div className="invite-banner" style={{ margin: '0 16px 16px' }}>
+              <div style={{ background: '#fef3c7', border: '1px solid #fde68a', color: '#b45309', borderRadius: 12, padding: '12px 16px', margin: '16px 0', fontSize: 13, fontWeight: 500 }}>
                 <span>Processing your entry into the circle...</span>
               </div>
             )}
 
-            <div className="filter-scroll">
-              <button className={`filter-tag ${!filterMember ? 'active' : ''}`} onClick={() => setFilterMember(null)}>All</button>
+            {/* Horizontal Filter Bar */}
+            <div style={{ display: 'flex', gap: 8, overflowX: 'auto', padding: '16px 0 20px', whiteSpace: 'nowrap', WebkitOverflowScrolling: 'touch' }}>
+              <button 
+                style={{ 
+                  padding: '8px 16px', borderRadius: 20, border: '1px solid', fontSize: 13, cursor: 'pointer',
+                  borderColor: !filterMember ? '#1D9E75' : '#e2e8f0',
+                  background: !filterMember ? '#1D9E75' : '#fff',
+                  color: !filterMember ? '#fff' : '#555',
+                  fontWeight: !filterMember ? 600 : 400
+                }} 
+                onClick={() => setFilterMember(null)}
+              >
+                All
+              </button>
               {CATEGORIES.map((c) => (
-                <button key={c} className={`filter-tag ${filterMember === c ? 'active' : ''}`} onClick={() => setFilterMember(c)}>
+                <button 
+                  key={c} 
+                  style={{ 
+                    padding: '8px 16px', borderRadius: 20, border: '1px solid', fontSize: 13, cursor: 'pointer',
+                    borderColor: filterMember === c ? '#1D9E75' : '#e2e8f0',
+                    background: filterMember === c ? '#1D9E75' : '#fff',
+                    color: filterMember === c ? '#fff' : '#555',
+                    fontWeight: filterMember === c ? 600 : 400
+                  }} 
+                  onClick={() => setFilterMember(c)}
+                >
                   {c}
                 </button>
               ))}
             </div>
 
-            <div style={{ padding: '0 16px' }}>
+            {/* Memories List Wrapper */}
+            <div>
               {filteredMemories.length === 0 ? (
-                <div style={{ textAlign: 'center', padding: '60px 20px', color: '#999' }}>
+                <div style={{ textAlign: 'center', padding: '60px 20px', color: '#999', background: '#fff', borderRadius: 16, border: '1px solid #e2e8f0' }}>
                   <div style={{ fontSize: 40, marginBottom: 12 }}>✨</div>
-                  <p style={{ margin: 0, fontSize: 15 }}>No memories posted in this category yet.</p>
-                  <p style={{ margin: '4px 0 0', fontSize: 13, color: '#ccc' }}>Be the first to preserve a moment!</p>
+                  <p style={{ margin: 0, fontSize: 15, fontWeight: 500, color: '#1a1a2e' }}>No memories posted here yet.</p>
+                  <p style={{ margin: '4px 0 0', fontSize: 13, color: '#888' }}>Be the first to preserve a moment!</p>
                 </div>
               ) : (
                 filteredMemories.map((m) => (
-                  <div key={m.id} className="card" style={{ marginBottom: 16, padding: 16, cursor: 'pointer' }} onClick={() => { setDetailId(m.id); setScreen('detail'); }}>
+                  <div 
+                    key={m.id} 
+                    style={{ background: '#fff', border: '1px solid #e2e8f0', borderRadius: 16, padding: 18, marginBottom: 14, cursor: 'pointer', boxShadow: '0 1px 3px rgba(0,0,0,0.02)', transition: 'transform 0.2s' }} 
+                    onClick={() => { setDetailId(m.id); setScreen('detail'); }}
+                  >
                     <span style={{ fontSize: 11, fontWeight: 700, color: '#1D9E75', textTransform: 'uppercase', letterSpacing: 0.5 }}>{m.category}</span>
-                    <h3 style={{ margin: '4px 0 6px', fontFamily: 'Lora, serif', fontSize: 18 }}>{m.title}</h3>
-                    <p style={{ margin: 0, fontSize: 13, color: '#666' }}>By {m.author_name} · {timeAgo(m.created_at)}</p>
+                    <h3 style={{ margin: '6px 0', fontFamily: 'Lora, serif', fontSize: 18, color: '#1a1a2e', fontWeight: 600 }}>{m.title}</h3>
+                    <p style={{ margin: 0, fontSize: 12, color: '#666' }}>By {m.author_name} · {timeAgo(m.created_at)}</p>
                   </div>
                 ))
               )}
             </div>
-          </>
+          </div>
         )}
 
-        {screen === 'add' && <div className="card" style={{ margin: 20, padding: 20 }}><p>Add Memory View Component</p><button className="btn" onClick={() => setScreen('dashboard')}>Back</button></div>}
-        {screen === 'detail' && <div className="card" style={{ margin: 20, padding: 20 }}><p>Memory Detail View Component</p><button className="btn" onClick={() => setScreen('dashboard')}>Back</button></div>}
-        {screen === 'circle' && <div className="card" style={{ margin: 20, padding: 20 }}><p>Circle Management Component</p><button className="btn" style={{ marginBottom: 12 }} onClick={() => setScreen('dashboard')}>Back</button><button className="btn btn-primary" onClick={handleSignOut}>Sign Out</button></div>}
+    {/* ─── SCREEN: ADD MEMORY ─── */}
+        {screen === 'add' && (
+          <div className="card" style={{ margin: '20px 16px 40px', padding: 20 }}>
+            <h2 style={{ fontFamily: 'Lora, serif', fontSize: 22, color: '#1a1a2e', marginBottom: 18 }}>Preserve a Memory</h2>
+            
+            <p className="section-label">Memory Title</p>
+            <input 
+              type="text" 
+              value={memTitle} 
+              onChange={(e) => setMemTitle(e.target.value)} 
+              placeholder="e.g., Nani's Secret Cardamom Chai" 
+              style={{ marginBottom: 16 }}
+            />
 
+            <p className="section-label">Category</p>
+            <select 
+              value={memCategory} 
+              onChange={(e) => setMemCategory(e.target.value)}
+              style={{ width: '100%', padding: '12px', borderRadius: 10, border: '1px solid #e2e8f0', background: '#fff', fontSize: 14, marginBottom: 16 }}
+            >
+              {CATEGORIES.map(c => <option key={c} value={c}>{c}</option>)}
+            </select>
+
+            <p className="section-label">Memory Type</p>
+            <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
+              {[
+                { type: 'text', label: '✍️ Story' },
+                { type: 'recipe', label: '🍳 Recipe' },
+                { type: 'voice', label: '🎙 Voice' },
+                { type: 'photo', label: '📷 Photo Gallery' }
+              ].map((t) => (
+                <button 
+                  key={t.type} 
+                  type="button"
+                  className={`filter-tag ${memType === t.type ? 'active' : ''}`}
+                  onClick={() => setMemType(t.type)}
+                  style={{ flex: 1, textAlign: 'center', justifyContent: 'center', margin: 0, padding: '8px 0', fontSize: 12 }}
+                >
+                  {t.label}
+                </button>
+              ))}
+            </div>
+
+            {/* Dynamic Inputs based on selection */}
+            {(memType === 'text' || memType === 'recipe') && (
+              <>
+                <p className="section-label">{memType === 'recipe' ? 'Ingredients & Steps' : 'The Story'}</p>
+                <textarea 
+                  rows="6" 
+                  value={memContent} 
+                  onChange={(e) => setMemContent(e.target.value)} 
+                  placeholder={memType === 'recipe' ? 'List the ingredients and adjustments made by hand...' : 'Capture the moments, expressions, and atmosphere...'}
+                  style={{ width: '100%', padding: 12, borderRadius: 10, border: '1px solid #e2e8f0', fontFamily: 'Lora, serif', fontSize: 14, lineHeight: 1.6, resize: 'vertical', marginBottom: 16 }}
+                />
+              </>
+            )}
+
+            {memType === 'voice' && (
+              <div style={{ marginBottom: 16 }}>
+                <p className="section-label">Voice Note</p>
+                <VoiceRecorder onRecorded={(blob) => setVoiceBlob(blob)} existingUrl={null} />
+              </div>
+            )}
+
+            {memType === 'photo' && (
+              <div style={{ marginBottom: 16 }}>
+                <p className="section-label">Upload Pictures</p>
+                <PhotoUploader photos={photos} setPhotos={setPhotos} />
+              </div>
+            )}
+
+            {/* Tag Family Members */}
+            {members.length > 1 && (
+              <div style={{ marginBottom: 20 }}>
+                <p className="section-label">Tag Family Members</p>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 6 }}>
+                  {members.filter(m => m.user_id !== user.id).map((m) => (
+                    <button
+                      key={m.id}
+                      type="button"
+                      onClick={() => toggleTag(m.id)}
+                      style={{
+                        padding: '6px 12px',
+                        borderRadius: 20,
+                        border: '1px solid',
+                        fontSize: 12,
+                        cursor: 'pointer',
+                        borderColor: taggedIds.includes(m.id) ? '#1D9E75' : '#e2e8f0',
+                        background: taggedIds.includes(m.id) ? '#f0fdf8' : '#fff',
+                        color: taggedIds.includes(m.id) ? '#1D9E75' : '#555'
+                      }}
+                    >
+                      {m.name} ({m.relationship})
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            <button className="btn btn-primary btn-full" onClick={addMemory} disabled={saving}>
+              {saving ? 'Uploading to Circle... 🌿' : 'Share with Family Circle →'}
+            </button>
+            <button className="btn btn-full" style={{ marginTop: 10, background: 'none', border: 'none', color: '#666' }} onClick={() => setScreen('dashboard')}>Cancel</button>
+          </div>
+        )}
+
+        {/* ─── SCREEN: MEMORY DETAIL ─── */}
+        {screen === 'detail' && activeMemory && (
+          <div className="card" style={{ margin: '20px 16px 40px', padding: 20 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 12 }}>
+              <span style={{ fontSize: 11, fontWeight: 700, color: '#1D9E75', textTransform: 'uppercase', letterSpacing: 0.5 }}>{activeMemory.category}</span>
+              <button 
+                onClick={() => setShowShareModal(true)}
+                style={{ background: '#f0fdf8', border: '1px solid #c8e6d0', color: '#1D9E75', padding: '4px 10px', borderRadius: 12, fontSize: 12, cursor: 'pointer', fontWeight: 600 }}
+              >
+                🔗 Share Out
+              </button>
+            </div>
+
+            <h2 style={{ fontFamily: 'Lora, serif', fontSize: 24, color: '#1a1a2e', margin: '0 0 8px' }}>{activeMemory.title}</h2>
+            <p style={{ margin: '0 0 20px', fontSize: 13, color: '#666' }}>
+              Preserved by <strong>{activeMemory.author_name}</strong> · {timeAgo(activeMemory.created_at)}
+            </p>
+
+            {/* Media Content blocks */}
+            {activeMemory.voice_url && (
+              <div style={{ background: '#f0fdf8', borderRadius: 12, padding: 14, marginBottom: 20, border: '1px solid #c8e6d0' }}>
+                <p style={{ margin: '0 0 8px', fontSize: 12, fontWeight: 700, color: '#1D9E75' }}>🎙 VOICE CLIP</p>
+                <audio src={activeMemory.voice_url} controls style={{ width: '100%' }} />
+              </div>
+            )}
+
+            {activeMemory.photo_urls?.length > 0 && (
+              <div style={{ marginBottom: 20, display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+                {activeMemory.photo_urls.map((url, i) => (
+                  <img key={i} src={url} alt="" style={{ width: '100%', maxHeight: 280, objectFit: 'cover', borderRadius: 12, border: '1px solid #eee' }} />
+                ))}
+              </div>
+            )}
+
+            {activeMemory.content && (
+              <p style={{ fontSize: 15, lineHeight: 1.8, color: '#2d3748', fontFamily: 'Lora, Georgia, serif', whiteSpace: 'pre-wrap', margin: '0 0 24px' }}>
+                {activeMemory.content}
+              </p>
+            )}
+
+            {/* Tagged Members display list */}
+            {taggedMembersFor(activeMemory).length > 0 && (
+              <div style={{ borderTop: '1px solid #eee', paddingTop: 14, marginBottom: 20 }}>
+                <p style={{ fontSize: 11, fontWeight: 700, color: '#aaa', textTransform: 'uppercase', marginBottom: 6 }}>Tagged in this memory</p>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                  {taggedMembersFor(activeMemory).map(mb => (
+                    <span key={mb.id} style={{ background: '#f1f5f9', color: '#475569', fontSize: 12, padding: '4px 10px', borderRadius: 12 }}>
+                      {mb.name} ({mb.relationship})
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            <div style={{ display: 'flex', gap: 10, borderTop: '1px solid #eee', paddingTop: 16 }}>
+              <button className="btn" style={{ flex: 1 }} onClick={() => setScreen('dashboard')}>← Back Home</button>
+              {(activeMemory.author_id === user.id || member?.role === 'admin') && (
+                <button 
+                  className="btn" 
+                  style={{ color: '#ef4444', borderColor: '#fee2e2', background: '#fef2f2' }} 
+                  onClick={() => window.confirm('Delete this memory permanently?') && deleteMemory(activeMemory.id)}
+                >
+                  🗑 Delete
+                </button>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* ─── SCREEN: CIRCLE MANAGEMENT ─── */}
+        {screen === 'circle' && (
+          <div className="card" style={{ margin: '20px 16px 40px', padding: 20 }}>
+            <div style={{ textAlign: 'center', marginBottom: 24 }}>
+              <div style={{ width: 64, height: 64, borderRadius: '50%', background: avatarColour(family?.name).bg, color: avatarColour(family?.name).fg, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 24, fontWeight: 'bold', margin: '0 auto 12px' }}>
+                🏡
+              </div>
+              <h2 style={{ fontFamily: 'Lora, serif', fontSize: 22, color: '#1a1a2e', margin: '0 0 4px' }}>{family?.name}</h2>
+              <p style={{ fontSize: 12, color: '#888', margin: 0 }}>Private Family Circle</p>
+            </div>
+
+            {/* Invite generation interface panel */}
+            <div style={{ background: '#f0fdf8', border: '1px solid #c8e6d0', borderRadius: 12, padding: 16, marginBottom: 24 }}>
+              <h4 style={{ margin: '0 0 4px', color: '#1D9E75', fontSize: 14 }}>Bring in your Family</h4>
+              <p style={{ fontSize: 12, color: '#555', margin: '0 0 12px', lineHeight: 1.5 }}>Share this private link with elders, siblings, or kids to invite them into this vault.</p>
+              <button className="btn btn-primary btn-full" style={{ background: '#1D9E75', borderColor: '#1D9E75', fontSize: 13 }} onClick={copyInviteLink}>
+                {copyLabel}
+              </button>
+            </div>
+
+            <h3 style={{ fontSize: 14, color: '#1a1a2e', marginBottom: 12, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.5 }}>Circle Members ({members.length})</h3>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginBottom: 32 }}>
+              {members.map((m) => (
+                <div key={m.id} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '10px 0', borderBottom: '1px solid #f1f5f9' }}>
+                  <div style={{ width: 40, height: 40, borderRadius: '50%', background: avatarColour(m.name).bg, color: avatarColour(m.name).fg, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 14, fontWeight: 700 }}>
+                    {initials(m.name)}
+                  </div>
+                  <div style={{ flex: 1 }}>
+                    <p style={{ margin: 0, fontSize: 14, fontWeight: 600, color: '#1a1a2e' }}>{m.name} {m.user_id === user.id && ' (You)'}</p>
+                    <p style={{ margin: 0, fontSize: 12, color: '#666' }}>{m.relationship} · <span style={{ textTransform: 'capitalize', color: m.role === 'admin' ? '#1D9E75' : '#666', fontWeight: m.role === 'admin' ? 600 : 400 }}>{m.role}</span></p>
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            <button className="btn btn-full" style={{ background: '#fee2e2', color: '#ef4444', borderColor: '#fca5a5', fontWeight: 600 }} onClick={handleSignOut}>
+              🚪 Secure Sign Out
+            </button>
+          </div>
+        )}
       </div>
 
       {['dashboard', 'add', 'detail', 'circle'].includes(screen) && (
