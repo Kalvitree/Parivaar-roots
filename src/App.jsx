@@ -59,40 +59,12 @@ function StoryContent() {
     <div style={{ fontFamily: 'Lora, Georgia, serif', padding: '0 4px' }}>
       <div style={{ borderLeft: '3px solid #1D9E75', padding: '14px 18px', margin: '0 0 24px', background: '#f0fdf8', borderRadius: '0 8px 8px 0' }}>
         <p style={{ fontSize: 15, lineHeight: 1.85, color: '#1a1a2e', margin: 0, fontStyle: 'italic' }}>
-          "Growing up, there was always something happening. A festival, a birthday, a Sunday that needed no reason at all.
-          And there was always food — made by my mother and aunts, cooked with a kind of love that filled the whole house
-          before the meal even reached the table."
+          "Growing up, our family gatherings were never planned by a calendar. They just happened around a kitchen table filled with laughter, stories, and food cooked from the heart. Those precious recipes were never written down, and the wisdom told over those meals was never recorded. Today, as our families scatter across the world, those beautiful, irreplaceable traditions—the unique way you celebrate, the songs you sing, and the words only you use—are at risk of quietly disappearing. Your grandkids deserve to know where they came from.
+          Parivaar is your private, sacred space to stop that drift and hand down your legacy. It is a warm, secure sanctuary built not for the public internet, but exclusively for your inner circle. By safely recording the recipes that live only in your hands, the stories behind your family rituals, and the memories of how it felt to gather, you ensure your grandkids will always know their roots. 
+          Start your circle today because your family's history is the greatest gift you can give them."
         </p>
         <p style={{ fontSize: 12, color: '#888', margin: '10px 0 0' }}>— Subha, founder</p>
       </div>
-      <p style={{ fontSize: 15, lineHeight: 1.85, color: '#2d3748', margin: '0 0 16px' }}>
-        Those gatherings were never planned with a calendar. They just happened — because family meant showing up.
-        Every week, someone's kitchen became the centre of the world. The recipes were never written down.
-        The stories told over those meals were never recorded.
-      </p>
-      <p style={{ fontSize: 15, lineHeight: 1.85, color: '#2d3748', margin: '0 0 16px' }}>
-        Every family has something that belongs only to them. A spice blend that belongs to no cookbook.
-        A way of celebrating that is entirely, uniquely theirs. The way your family has always done something —
-        that particular, irreplaceable way — that quietly disappears when it is not captured.
-      </p>
-      <div style={{ background: '#f8faff', borderRadius: 12, padding: '16px 18px', margin: '0 0 20px', border: '1px solid #e2e8f0' }}>
-        <p style={{ fontSize: 14, lineHeight: 1.8, color: '#2d3748', margin: '0 0 10px' }}>
-          We live in a world that moves faster than memory. Families scatter across cities and continents.
-          The elders who carried entire histories inside them leave before we think to ask.
-        </p>
-        <p style={{ fontSize: 14, lineHeight: 1.8, color: '#2d3748', margin: 0 }}>
-          We are the most connected generation in history — and somehow, the most at risk of forgetting where we came from.
-        </p>
-      </div>
-      <p style={{ fontSize: 15, lineHeight: 1.85, color: '#2d3748', margin: '0 0 16px' }}>
-        Parivaar was built as a quiet act of resistance to that drift. A private, warm space where your family can
-        capture the things that belong only to you — the recipe that exists only in someone's hands, the tradition
-        that marks how your family celebrates, the story behind the dish, the meaning behind the ritual.
-      </p>
-      <p style={{ fontSize: 15, lineHeight: 1.85, color: '#2d3748', margin: '0 0 20px' }}>
-        Not to share with the world. To pass down to the next generation. So that your grandchildren know not
-        just <em>what</em> you cooked, but <em>why</em>. Not just <em>how</em> you celebrated, but <em>what it felt like</em> to be there.
-      </p>
       <div style={{ border: '1px solid #1D9E75', borderRadius: 12, padding: '16px 18px', margin: '0 0 20px' }}>
         <p style={{ fontSize: 14, lineHeight: 1.8, color: '#1a1a2e', margin: '0 0 8px', fontWeight: 600 }}>Every parivaar has something that belongs only to them.</p>
         <p style={{ fontSize: 14, lineHeight: 1.8, color: '#555', margin: '0 0 4px' }}>The recipe that takes all morning and tastes like no other.</p>
