@@ -379,6 +379,7 @@ export default function App() {
   const [family, setFamily]   = useState(null);
   const [member, setMember]   = useState(null);
   const [members, setMembers] = useState([]);
+  const [inviteValid, setInviteValid] = useState(null); // 👈 ADD THIS: null = unverified, true = valid, false = invalid
 
   // ── Setup state ──────────────────────────────────────────────────────────────
   const [setupName, setSetupName]                   = useState('');
@@ -423,6 +424,32 @@ export default function App() {
   };
   /* ── PWA install prompt ───────────────────────────────────────────────────────
   const { canInstall, promptInstall, dismissInstall } = useInstallPrompt();*/
+// ── Validate Invite Link on Load ────────────────────────────────────────────
+  useEffect(() => {
+    if (!inviteToken) {
+      setInviteValid(false);
+      return;
+    }
+
+    const verifyInvite = async () => {
+      const { data, error } = await supabase
+        .from('family_circles')
+        .select('id, name')
+        .eq('invite_token', inviteToken)
+        .maybeSingle();
+
+      if (error || !data) {
+        console.error("Invalid or expired invite link provided.");
+        setInviteValid(false);
+      } else {
+        setInviteValid(true);
+        // Pre-populate family configuration details immediately if valid
+        setFamily(data);
+      }
+    };
+
+    verifyInvite();
+  }, [inviteToken]);
 
   // ── Auth listener (always runs — no conditional hooks) ───────────────────────
   useEffect(() => {
@@ -518,7 +545,7 @@ export default function App() {
     setSaving(true);
     setLoadingMsg('Verifying your passcode... 🌿');
 
-    // 1. Verify the 6-digit OTP passcode first to securely create or authenticate the user account
+    // 1. Verify the 8-digit OTP passcode first to securely create or authenticate the user account
     const { data: authData, error: authError } = await supabase.auth.verifyOtp({
       email: email.trim(),
       token: passcode.trim(),
@@ -611,35 +638,54 @@ export default function App() {
 
   // ── password authentication ──────────────────────────────────────────────────────────────────
  // ── Password Authentication (Temporary) ──────────────────────────────────────
-  // ── 6-Digit Email Passcode Authentication ────────────────────────────────────
+  // ── 8-Digit Email Passcode Authentication ────────────────────────────────────
   
-  // Step 1: Request the 6-digit code be sent to their email
- const sendEmailPasscode = async () => {
-  if (!email.trim()) {
-    showToast('Please enter your email.');
-    return;
-  }
-
-  setLoadingMsg('Sending code... ✉️');
-
-  const { error } = await supabase.auth.signInWithOtp({
-    email: email.trim(),
-    options: {
-      // Explicitly forcing Supabase to handle this as a OTP passcode/user sign up track
-      shouldCreateUser: true, 
+ // Step 1: Request the code, dynamically assessing if they are an existing or new user
+  const sendEmailPasscode = async () => {
+    if (!email.trim()) {
+      showToast('Please enter your email.');
+      return;
     }
-  });
 
-  if (error) {
-    showToast(error.message);
-    setLoadingMsg('');
-    return;
-  }
+    setLoadingMsg('Checking account status... 🔍');
 
-  showToast('6-digit code sent to your email! 🎉');
-  setCodeSent(true);
-  setLoadingMsg('');
-};
+    try {
+      const { data: existingUserRecord, error: checkError } = await supabase
+        .from('members')
+        .select('id, family_id')
+        .eq('email', email.trim().toLowerCase())
+        .maybeSingle();
+
+      if (checkError) {
+        console.error("Database check failed:", checkError);
+      }
+
+      const { error: otpError } = await supabase.auth.signInWithOtp({
+        email: email.trim(),
+        options: {
+          shouldCreateUser: true,
+        }
+      });
+
+      if (otpError) {
+        showToast(otpError.message);
+        setLoadingMsg('');
+        return;
+      }
+
+      if (existingUserRecord) {
+        showToast('Welcome back! 8-digit passcode sent to your email. 🎉');
+      } else {
+        showToast('8-digit passcode sent! Create or join your circle next. 🎉');
+      }
+
+      setCodeSent(true);
+    } catch (err) {
+      showToast('An unexpected error occurred.');
+    } finally {
+      setLoadingMsg('');
+    }
+  };
 
   // Step 2: Verify the code the user typed in
   const verifyEmailPasscode = async () => {
@@ -650,7 +696,6 @@ export default function App() {
 
     setLoadingMsg('Verifying code... 🌿');
 
-    // 1. Authenticate with Supabase Auth
     const { data, error } = await supabase.auth.verifyOtp({
       email: email.trim(),
       token: passcode.trim(),
@@ -670,52 +715,31 @@ export default function App() {
       return;
     }
 
-    console.log("🎯 STEP 1: Supabase Auth successful. User ID is:", authenticatedUser.id);
-
-    // Explicitly update session and user states immediately
     setSession(data.session);
     setUser(authenticatedUser); 
 
-    // 2. Query the custom members table using the secure user ID
-    console.log("🔍 STEP 2: Looking up custom profile in 'members' table...");
-    const { data: existingMember, error: dbError } = await supabase
+    const { data: existingMember } = await supabase
       .from('members')
       .select('*, family_circles(*)')
       .eq('user_id', authenticatedUser.id)
       .maybeSingle();
 
-    if (dbError) {
-      console.error("❌ Database Error during lookup:", dbError);
-    }
-
     if (existingMember) {
-      console.log("✅ STEP 3: Profile found! Member Row Data:", existingMember);
-      
-      // Explicitly commit all data collections to state variables
       setMember(existingMember);
       setFamily(existingMember.family_circles);
-      
-      // Pull dynamic memories into feed arrays
       await fetchFamilyData(existingMember.family_circles.id);
-      
-      // Force system routing straight to dashboard bypass
       setScreen('dashboard');
       setLoadingMsg('');
       return;
     }
 
-    // 3. Fallback Check: If user_id lookup failed, try searching matching email string 
-    console.log("⚠️ STEP 4: No row found by user_id. Trying fallback search by email string...");
     const { data: emailMember } = await supabase
       .from('members')
       .select('*, family_circles(*)')
-      .eq('email', authenticatedUser.email?.trim())
+      .eq('email', email.trim().toLowerCase())
       .maybeSingle();
 
     if (emailMember) {
-      console.log("🎯 Fallback found member matching email string! Upgrading row with secure user_id...");
-      
-      // Repair the database record on-the-fly so this never happens again
       await supabase
         .from('members')
         .update({ user_id: authenticatedUser.id })
@@ -730,8 +754,6 @@ export default function App() {
       return;
     }
 
-    // 4. Genuine Invitation Path Handling
-    console.log("ℹ️ STEP 5: Completely new user. Evaluating invite token routing context...");
     if (inviteToken) {
       const { data: fc } = await supabase
         .from('family_circles').select('*').eq('invite_token', inviteToken).maybeSingle();
@@ -744,10 +766,11 @@ export default function App() {
       }
     }
 
-    // Default catch-all for accounts without any bound circle entries
     setScreen('no-access');
     setLoadingMsg('');
   };
+
+  // Next function line should instantly be: const uploadVoice = async (memoryId) => { ...
 
   // ── Upload helpers ───────────────────────────────────────────────────────────
   const uploadVoice = async (memoryId) => {
@@ -858,7 +881,6 @@ export default function App() {
   }
 
   // ─── SIGN IN ─────────────────────────────────────────────────────────────────
-  // ─── SIGN IN ─────────────────────────────────────────────────────────────────
   if (!session && screen === 'signin') {
     return (
       <div style={{ maxWidth: '440px', margin: '0 auto', paddingBottom: 40 }}>
@@ -870,10 +892,24 @@ export default function App() {
         </div>
 
         <div style={{ padding: '20px 16px' }}>
-          {inviteToken && (
+          
+          {/* 🌿 CASE A: The Link is Completely Valid */}
+          {inviteToken && inviteValid === true && (
             <div style={{ background: '#f0fdf8', border: '1px solid #c8e6d0', color: '#1D9E75', display: 'flex', gap: 10, alignItems: 'center', borderRadius: 12, padding: '12px 14px', marginBottom: 20 }}>
               <span style={{ fontSize: 20 }}>🎉</span>
-              <span style={{ fontSize: 13, fontWeight: 500 }}>You've been invited to join a private family circle!</span>
+              <span style={{ fontSize: 13, fontWeight: 500 }}>
+                You've been invited to join the private <strong>{family?.name || 'Family'}</strong> circle!
+              </span>
+            </div>
+          )}
+
+          {/* ⚠️ CASE B: The Link is Broken or Dead */}
+          {inviteToken && inviteValid === false && (
+            <div style={{ background: '#fef2f2', border: '1px solid #fca5a5', color: '#ef4444', display: 'flex', gap: 10, alignItems: 'center', borderRadius: 12, padding: '12px 14px', marginBottom: 20 }}>
+              <span style={{ fontSize: 20 }}>⚠️</span>
+              <span style={{ fontSize: 13, fontWeight: 500 }}>
+                This invitation link is invalid or has expired. You can still log in to your account below.
+              </span>
             </div>
           )}
 
@@ -967,7 +1003,7 @@ export default function App() {
                   <p className="section-label">Your Email</p>
                   <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="your@email.com" style={{ marginBottom: 14 }} />
                   <button className="btn btn-primary btn-full" onClick={sendEmailPasscode} disabled={saving || !!loadingMsg}>
-                    {loadingMsg ? loadingMsg : 'Send 6-Digit Passcode →'}
+                    {loadingMsg ? loadingMsg : 'Send 8-Digit Passcode →'}
                   </button>
                 </>
               ) : (
