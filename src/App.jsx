@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState, useCallback, useRef } from 'react';
 import { supabase } from './supabaseClient';
+
 //import { useInstallPrompt } from './useInstallPrompt';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -16,6 +17,7 @@ const MAX_PHOTOS     = 3;
 const MAX_PHOTO_BYTES = 5 * 1024 * 1024; // 5 MB
 const MAX_VOICE_SECS  = 180;              // 3 min
 const BUCKET          = 'attachments';
+
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 const initials = (name = '') =>
@@ -359,7 +361,86 @@ function ShareModal({ memory, familyId, onClose, showToast }) {
     </div>
   );
 }
+// =============================================================================
+// NEW STEP: Extract the Dashboard Screen out of the monolithic wrapper
+// =============================================================================
+function DashboardScreen({ family, member, user, initials, filterMember, setFilterMember, CATEGORIES, filteredMemories, timeAgo, setDetailId, setScreen }) {
+  return (
+    <div style={{ maxWidth: '480px', margin: '0 auto', padding: '0 16px 40px' }}>
+      {/* Header Area */}
+      <header style={{ display: 'flex', justifycontent: 'space-between', alignItems: 'center', padding: '24px 0 16px', borderBottom: '1px solid #f1f5f9' }}>
+        <div>
+          <span style={{ fontSize: 11, fontWeight: 700, letterSpacing: 1.5, color: '#1D9E75', textTransform: 'uppercase' }}>
+            PARIVAAR • {family?.name?.toUpperCase() || 'FAMILY'}
+          </span>
+          <h1 style={{ margin: '4px 0 0', fontFamily: 'Lora, serif', fontSize: 26, color: '#1a1a2e', fontWeight: 600 }}>
+            Living Memories
+          </h1>
+        </div>
+        <button 
+          onClick={() => setScreen('circle')}
+          style={{ width: 42, height: 42, borderRadius: '50%', background: '#f0fdf8', border: '1px solid #1D9E75', color: '#1D9E75', fontWeight: 700, fontSize: 14, cursor: 'pointer' }}
+        >
+          {initials(member?.name || user?.email)}
+        </button>
+      </header>
 
+      {/* Horizontal Filter Bar */}
+      <div style={{ display: 'flex', gap: 8, overflowX: 'auto', padding: '16px 0 20px', whiteSpace: 'nowrap', WebkitOverflowScrolling: 'touch' }}>
+        <button 
+          style={{ 
+            padding: '8px 16px', borderRadius: 20, border: '1px solid', fontSize: 13, cursor: 'pointer',
+            borderColor: !filterMember ? '#1D9E75' : '#e2e8f0',
+            background: !filterMember ? '#1D9E75' : '#fff',
+            color: !filterMember ? '#fff' : '#555',
+            fontWeight: !filterMember ? 600 : 400
+          }} 
+          onClick={() => setFilterMember(null)}
+        >
+          All
+        </button>
+        {CATEGORIES.map((c) => (
+          <button 
+            key={c} 
+            style={{ 
+              padding: '8px 16px', borderRadius: 20, border: '1px solid', fontSize: 13, cursor: 'pointer',
+              borderColor: filterMember === c ? '#1D9E75' : '#e2e8f0',
+              background: filterMember === c ? '#1D9E75' : '#fff',
+              color: filterMember === c ? '#fff' : '#555',
+              fontWeight: filterMember === c ? 600 : 400
+            }} 
+            onClick={() => setFilterMember(c)}
+          >
+            {c}
+          </button>
+        ))}
+      </div>
+
+      {/* Memories List Wrapper */}
+      <div>
+        {filteredMemories.length === 0 ? (
+          <div style={{ textAlign: 'center', padding: '60px 20px', color: '#999', background: '#fff', borderRadius: 16, border: '1px solid #e2e8f0' }}>
+            <div style={{ fontSize: 40, marginBottom: 12 }}>✨</div>
+            <p style={{ margin: 0, fontSize: 15, fontWeight: 500, color: '#1a1a2e' }}>No memories posted here yet.</p>
+            <p style={{ margin: '4px 0 0', fontSize: 13, color: '#888' }}>Be the first to preserve a moment!</p>
+          </div>
+        ) : (
+          filteredMemories.map((m) => (
+            <div 
+              key={m.id} 
+              style={{ background: '#fff', border: '1px solid #e2e8f0', borderRadius: 16, padding: 18, marginBottom: 14, cursor: 'pointer', boxShadow: '0 1px 3px rgba(0,0,0,0.02)' }} 
+              onClick={() => { setDetailId(m.id); setScreen('detail'); }}
+            >
+              <span style={{ fontSize: 11, fontWeight: 700, color: '#1D9E75', textTransform: 'uppercase', letterSpacing: 0.5 }}>{m.category}</span>
+              <h3 style={{ margin: '6px 0', fontFamily: 'Lora, serif', fontSize: 18, color: '#1a1a2e', fontWeight: 600 }}>{m.title}</h3>
+              <p style={{ margin: 0, fontSize: 12, color: '#666' }}>By {m.author_name} · {timeAgo(m.created_at)}</p>
+            </div>
+          ))
+        )}
+      </div>
+    </div>
+  );
+}
 // ─────────────────────────────────────────────────────────────────────────────
 // MAIN APP
 // ─────────────────────────────────────────────────────────────────────────────
@@ -369,6 +450,7 @@ export default function App() {
   const [shareToken]   = useState(() => getUrlParam('share'));
 
   // ── Core state ───────────────────────────────────────────────────────────────
+  const [allFamilies, setAllFamilies] = useState([]);
   const [session, setSession] = useState(null);
   const [user, setUser]       = useState(null);
   const [loading, setLoading] = useState(true);
@@ -474,17 +556,36 @@ export default function App() {
   const resolveFamily = async () => {
     setLoading(true);
     
-    // 1. Check if user is already a member of ANY family circle
-    const { data: existing } = await supabase
+    // 1. Fetch ALL memberships for this user
+    let { data: memberships, error } = await supabase
       .from('members')
       .select('*, family_circles(*)')
-      .eq('user_id', user.id)
-      .maybeSingle();
+      .eq('user_id', user.id);
 
-    if (existing) {
-      setMember(existing);
-      setFamily(existing.family_circles);
-      await fetchFamilyData(existing.family_circles.id);
+    // Try email lookup fallback if ID lookup came up empty
+    if ((!memberships || memberships.length === 0) && user.email) {
+      const { data: emailMatches } = await supabase
+        .from('members')
+        .select('*, family_circles(*)')
+        .eq('email', user.email.toLowerCase().trim());
+      
+      if (emailMatches && emailMatches.length > 0) {
+        // Link all found records to this user's ID
+        await Promise.all(emailMatches.map(m => 
+          supabase.from('members').update({ user_id: user.id }).eq('id', m.id)
+        ));
+        memberships = emailMatches;
+      }
+    }
+
+    // 2. If they have at least one family circle, route them to the first one by default
+    if (memberships && memberships.length > 0) {
+      setAllFamilies(memberships); // Store all available circles
+      
+      const activeMembership = memberships[0]; // Auto-select the first one
+      setMember(activeMembership);
+      setFamily(activeMembership.family_circles);
+      await fetchFamilyData(activeMembership.family_circles.id);
       setScreen('dashboard');
       setLoading(false);
       return;
@@ -535,6 +636,26 @@ export default function App() {
     setMembers(mems2 ?? []);
   };
 
+  const handleSwitchFamily = async (chosenMembership) => {
+    setLoading(true);
+    try {
+      setMember(chosenMembership);
+      setFamily(chosenMembership.family_circles);
+      
+      // Clear out old data first so the UI doesn't flicker with the wrong family's content
+      setMediaItems([]);
+      setLanguageItems([]);
+      setRecipeItems([]);
+      setHistoryItems([]);
+      
+      // Fetch the fresh data for the newly selected family circle
+      await fetchFamilyData(chosenMembership.family_circles.id);
+    } catch (err) {
+      console.error("Error switching family:", err);
+    } finally {
+      setLoading(false);
+    }
+  };
   // ── Create family ────────────────────────────────────────────────────────────
   const createFamily = async () => {
     if (!newFamilyName.trim() || !setupName.trim() || !setupRelationship.trim() || !email.trim() || !passcode.trim()) {
@@ -635,7 +756,39 @@ export default function App() {
     setScreen('dashboard');
     setSaving(false);
   };
-
+const renderScreen = () => {
+    switch (screen) {
+      case 'dashboard':
+        return (
+          <DashboardScreen 
+            family={family} member={member} user={user} initials={initials} 
+            filterMember={filterMember} setFilterMember={setFilterMember} 
+            CATEGORIES={CATEGORIES} filteredMemories={filteredMemories} 
+            timeAgo={timeAgo} setDetailId={setDetailId} setScreen={setScreen} 
+          />
+        );
+      case 'add':
+        return (
+          <div className="card" style={{ margin: '20px 16px 40px', padding: 20 }}>
+             {/* ... Keep your exact Add Memory UI Content here ... */}
+          </div>
+        );
+      case 'detail':
+        return (
+          <div className="card" style={{ margin: '20px 16px 40px', padding: 20 }}>
+             {/* ... Keep your exact Detail UI Content here ... */}
+          </div>
+        );
+      case 'circle':
+        return (
+          <div className="card" style={{ margin: '20px 16px 40px', padding: 20 }}>
+             {/* ... Keep your exact Circle UI Content here ... */}
+          </div>
+        );
+      default:
+        return null;
+    }
+  };
   // ── password authentication ──────────────────────────────────────────────────────────────────
  // ── Password Authentication (Temporary) ──────────────────────────────────────
   // ── 8-Digit Email Passcode Authentication ────────────────────────────────────
@@ -1078,88 +1231,8 @@ export default function App() {
   return (
     <div className="app-shell">
       <div className="scroll-area" style={{ paddingBottom: ['dashboard', 'add', 'detail', 'circle'].includes(screen) ? 80 : 20 }}>
-        
-        {screen === 'dashboard' && (
-          <div style={{ maxWidth: '480px', margin: '0 auto', padding: '0 16px 40px' }}>
-            {/* Header Area */}
-            <header style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '24px 0 16px', borderBottom: '1px solid #f1f5f9' }}>
-              <div>
-                <span style={{ fontSize: 11, fontWeight: 700, letterSpacing: 1.5, color: '#1D9E75', textTransform: 'uppercase' }}>
-                  PARIVAAR • {family?.name?.toUpperCase() || 'FAMILY'}
-                </span>
-                <h1 style={{ margin: '4px 0 0', fontFamily: 'Lora, serif', fontSize: 26, color: '#1a1a2e', fontWeight: 600 }}>
-                  Living Memories
-                </h1>
-              </div>
-              <button 
-                onClick={() => setScreen('circle')}
-                style={{ width: 42, height: 42, borderRadius: '50%', background: '#f0fdf8', border: '1px solid #1D9E75', color: '#1D9E75', fontWeight: 700, fontSize: 14, cursor: 'pointer' }}
-              >
-                {initials(member?.name || user?.email)}
-              </button>
-            </header>
-
-            {inviteToken && !member && (
-              <div style={{ background: '#fef3c7', border: '1px solid #fde68a', color: '#b45309', borderRadius: 12, padding: '12px 16px', margin: '16px 0', fontSize: 13, fontWeight: 500 }}>
-                <span>Processing your entry into the circle...</span>
-              </div>
-            )}
-
-            {/* Horizontal Filter Bar */}
-            <div style={{ display: 'flex', gap: 8, overflowX: 'auto', padding: '16px 0 20px', whiteSpace: 'nowrap', WebkitOverflowScrolling: 'touch' }}>
-              <button 
-                style={{ 
-                  padding: '8px 16px', borderRadius: 20, border: '1px solid', fontSize: 13, cursor: 'pointer',
-                  borderColor: !filterMember ? '#1D9E75' : '#e2e8f0',
-                  background: !filterMember ? '#1D9E75' : '#fff',
-                  color: !filterMember ? '#fff' : '#555',
-                  fontWeight: !filterMember ? 600 : 400
-                }} 
-                onClick={() => setFilterMember(null)}
-              >
-                All
-              </button>
-              {CATEGORIES.map((c) => (
-                <button 
-                  key={c} 
-                  style={{ 
-                    padding: '8px 16px', borderRadius: 20, border: '1px solid', fontSize: 13, cursor: 'pointer',
-                    borderColor: filterMember === c ? '#1D9E75' : '#e2e8f0',
-                    background: filterMember === c ? '#1D9E75' : '#fff',
-                    color: filterMember === c ? '#fff' : '#555',
-                    fontWeight: filterMember === c ? 600 : 400
-                  }} 
-                  onClick={() => setFilterMember(c)}
-                >
-                  {c}
-                </button>
-              ))}
-            </div>
-
-            {/* Memories List Wrapper */}
-            <div>
-              {filteredMemories.length === 0 ? (
-                <div style={{ textAlign: 'center', padding: '60px 20px', color: '#999', background: '#fff', borderRadius: 16, border: '1px solid #e2e8f0' }}>
-                  <div style={{ fontSize: 40, marginBottom: 12 }}>✨</div>
-                  <p style={{ margin: 0, fontSize: 15, fontWeight: 500, color: '#1a1a2e' }}>No memories posted here yet.</p>
-                  <p style={{ margin: '4px 0 0', fontSize: 13, color: '#888' }}>Be the first to preserve a moment!</p>
-                </div>
-              ) : (
-                filteredMemories.map((m) => (
-                  <div 
-                    key={m.id} 
-                    style={{ background: '#fff', border: '1px solid #e2e8f0', borderRadius: 16, padding: 18, marginBottom: 14, cursor: 'pointer', boxShadow: '0 1px 3px rgba(0,0,0,0.02)', transition: 'transform 0.2s' }} 
-                    onClick={() => { setDetailId(m.id); setScreen('detail'); }}
-                  >
-                    <span style={{ fontSize: 11, fontWeight: 700, color: '#1D9E75', textTransform: 'uppercase', letterSpacing: 0.5 }}>{m.category}</span>
-                    <h3 style={{ margin: '6px 0', fontFamily: 'Lora, serif', fontSize: 18, color: '#1a1a2e', fontWeight: 600 }}>{m.title}</h3>
-                    <p style={{ margin: 0, fontSize: 12, color: '#666' }}>By {m.author_name} · {timeAgo(m.created_at)}</p>
-                  </div>
-                ))
-              )}
-            </div>
-          </div>
-        )}
+        {/* Call the routing function right here! */}
+        {renderScreen()}
 
     {/* ─── SCREEN: ADD MEMORY ─── */}
         {screen === 'add' && (
